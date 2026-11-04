@@ -3,7 +3,8 @@
 Defines: `FfsZipWriter` (member claiming, fail-safe streamed member writes,
 root artefacts), the human-readable root traceability summary, and the
 `<archive>.zip.sha256` sidecar.
-Used by: core.reconstructor (iOS), core.android_reconstructor.
+Used by: core.ios_reconstructor, core.ios_traceability, core.traceability,
+core.android_reconstructor.
 Depends on: core.output_paths, config.settings.
 
 WHY a zip, streamed: a rebuilt device path is long before the operator's own

@@ -38,15 +38,15 @@ join: read each row, find its blob, and write it back to
 
 ## Where this lives in the code
 
-| Step | Implementation in `core/reconstructor.py` |
+| Step | Implementation |
 | --- | --- |
-| Validate a backup directory | `resolve_backup_dir` |
-| Walk the `Files` table | `iter_manifest_rows`, `iter_file_records` |
-| Decode the per-file metadata plist | `parse_file_metadata`, `decode_nskeyed` |
-| Locate a blob from its `fileID` | `source_path_for_file_id` |
-| Map a domain to a path | `filesystem_domain_root` (table: `config/domain_maps/`) |
-| Make a path host-safe | `sanitise_segment`, `safe_join_path` |
-| Resolve output-path collisions | `claim_unique_path` |
+| Validate a backup directory | `core/ios_backup.py` `resolve_backup_dir` |
+| Walk the `Files` table | `core/ios_backup.py` `iter_manifest_rows`, `iter_file_records` |
+| Decode the per-file metadata plist | `core/ios_backup.py` `parse_file_metadata`, `decode_nskeyed` |
+| Locate a blob from its `fileID` | `core/ios_backup.py` `source_path_for_file_id` |
+| Map a domain to a path | `core/ios_domain_map.py` `filesystem_domain_root` (table: `config/domain_maps/`) |
+| Make a path host-safe | `core/output_paths.py` `sanitise_segment`, `safe_join_path` |
+| Resolve output-path collisions | `core/output_paths.py` `claim_unique_path` |
 
 ## Domains
 

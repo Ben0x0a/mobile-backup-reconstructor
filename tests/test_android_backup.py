@@ -31,7 +31,9 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from config import settings
 from core import android_backup as ab
 from core import android_reconstructor as arecon
+from core import errors, traceability
 from core import reconstructor as recon
+from launcher import cli
 
 ROUNDS = 1000  # AOSP uses 10000; fewer keeps the suite fast and is equally valid
 
@@ -93,7 +95,7 @@ MEMBERS = {
 
 def run_cli(argv: list[str]) -> int:
     with contextlib.redirect_stdout(io.StringIO()):
-        return recon.main(argv)
+        return cli.main(argv)
 
 
 class AndroidBackupTests(unittest.TestCase):
@@ -166,7 +168,7 @@ class AndroidBackupTests(unittest.TestCase):
         self.assertEqual(provenance["stats"]["written"], len(MEMBERS))
         self.assertIn(provenance["backup"]["sha256"], summary)
         sidecar = output.with_name(output.name + settings.ZIP_HASH_SIDECAR_SUFFIX)
-        self.assertTrue(sidecar.read_text().startswith(recon.sha256_file(output)))
+        self.assertTrue(sidecar.read_text().startswith(traceability.sha256_file(output)))
 
     def test_plain_uncompressed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -193,7 +195,7 @@ class AndroidBackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ab_path = self.write_ab(Path(tmp))
             ab_path.write_bytes(ab_path.read_bytes()[:-40])
-            with self.assertRaises(recon.ReconstructionFailedError):
+            with self.assertRaises(errors.ReconstructionFailedError):
                 self.reconstruct(ab_path)
             self.assertFalse((Path(tmp) / "out.zip").exists())
 

@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [0.3.0] — 2026-11-04
 
+### Internal
+
+- `core/reconstructor.py` (about 1,800 lines, mixing crypto, manifest walking,
+  mapping, traceability, the pipeline and the CLI) is split by concern into
+  `ios_backup`, `ios_crypto`, `ios_domain_map`, `ios_traceability`,
+  `ios_reconstructor`, `traceability`, `run_control`, `errors`, `crypto_backend`
+  and `package_resources`; the CLI moves to `launcher/cli.py`. Function bodies
+  are unchanged. `core.reconstructor` keeps `reconstruct_backup` and
+  `inspect_backup`; library code importing other names from it must import them
+  from their new module (see docs/architecture.md). Diagnostics are now logged
+  under each module's own logger in the `core` package rather than
+  `core.reconstructor`.
+
 ### Changed
 
 - **Renamed to `mobile-backup-reconstruct`** (package `mobile-backup-reconstructor`)

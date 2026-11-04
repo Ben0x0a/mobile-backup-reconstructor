@@ -2,7 +2,8 @@
 
 Defines: `FileRecord` (one `Manifest.db` row resolved to source and output
 paths) and `ReconstructionResult` (the outcome reported by a run).
-Used by: core.reconstructor, core.android_reconstructor, gui.interface, launcher.cli.
+Used by: core.reconstructor, core.ios_reconstructor, core.ios_backup,
+core.android_reconstructor, gui.interface, launcher.cli.
 Depends on: config.settings.
 """
 

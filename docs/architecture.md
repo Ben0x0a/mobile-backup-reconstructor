@@ -11,20 +11,31 @@ flowchart TD
         UI[gui/interface.py<br/>PySide6 widgets + workers]
     end
     subgraph Engine
-        R[core/reconstructor.py<br/>keybag, manifest, pipeline, traceability]
-        MO[core/models.py<br/>FileRecord, ReconstructionResult]
+        R[core/reconstructor.py<br/>entry points, platform dispatch]
+        IR[core/ios_reconstructor.py<br/>iOS pipeline]
+        AR[core/android_reconstructor.py<br/>Android pipeline]
+        IB[ios_backup / ios_crypto / ios_domain_map<br/>read, decrypt, map an iOS backup]
+        AB[core/android_backup.py<br/>.ab header, unlock, tar stream]
+        DE[core/decryptor.py<br/>iOS decrypt-only mode]
+        SH[shared: ffs_archive, output_paths,<br/>traceability, run_control, errors]
     end
     subgraph Configuration
         S[config/settings.py<br/>tuneable constants]
-        D[config/domain_maps/*.yaml<br/>domain to path mapping]
+        D[config/domain_maps, config/android_maps<br/>path mappings]
     end
 
     M --> CLI --> R
+    CLI --> DE
     M --> GL --> UI --> R
-    R --> MO
-    R --> S
-    R --> D
-    MO --> S
+    UI --> DE
+    R --> IR --> IB
+    R --> AR --> AB
+    IR --> SH
+    AR --> SH
+    DE --> IB
+    IB --> D
+    AR --> D
+    SH --> S
 ```
 
 Dependencies flow inward. The shells hold no reconstruction logic; the engine
@@ -78,10 +89,19 @@ already created as the parent of an earlier file record.
 | Module | Responsibility |
 | --- | --- |
 | `main.py` | Dispatch between GUI and CLI |
-| `launcher/cli.py` | CLI entry point |
+| `launcher/cli.py` | Argument parsing, flag validation, progress counter, JSON result and exit codes |
 | `launcher/gui.py` | GUI entry point, PySide6-absent handling |
 | `gui/interface.py` | Widgets and background workers; no reconstruction logic |
-| `core/reconstructor.py` | iOS: keybag, manifest parsing, mapping, pipeline, traceability, CLI parser; dispatches `.ab` input |
+| `core/reconstructor.py` | `reconstruct_backup` / `inspect_backup`: recognise an `.ab` by its header, else treat the input as iOS |
+| `core/ios_reconstructor.py` | iOS pipeline: folder and zip writers, dry run, output validation |
+| `core/ios_backup.py` | iOS backup directory, plists, `Manifest.db` walk, `FileRecord`s |
+| `core/ios_crypto.py` | Keybag, `Manifest.db` and per-file decryption, password handling |
+| `core/ios_domain_map.py` | Domain-map YAML loading and domain-to-path mapping |
+| `core/ios_traceability.py` | iOS provenance, enriched manifest, zip-root summary |
+| `core/traceability.py` | Shared artefact writers: digests, file-manifest CSV, `_traceability/`, failure report |
+| `core/run_control.py` | Progress and cancellation contracts, staging and promotion |
+| `core/errors.py`, `core/crypto_backend.py`, `core/package_resources.py` | Shared errors, optional `cryptography` loading, package-data lifetime |
+| `core/decryptor.py` | iOS decrypt-only mode |
 | `core/android_backup.py` | Android `.ab` format: header, password unlock, streamed decrypt/inflate/tar |
 | `core/android_reconstructor.py` | Android path mapping, pipeline, provenance and summary |
 | `core/ffs_archive.py` | The Full File System-like zip: member writes, root artefacts, hash sidecar |

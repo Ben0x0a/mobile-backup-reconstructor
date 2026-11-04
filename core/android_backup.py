@@ -4,7 +4,7 @@ Defines: header parsing (`AbHeader`, `read_ab_header`, `is_android_backup`),
 password unlocking of an encrypted archive (`unlock_encryption_key`), the
 streamed decrypt -> inflate -> tar chain (`open_ab_tar`), and `inspect_android_backup`.
 Used by: core.android_reconstructor, core.reconstructor (input detection, inspection).
-Depends on: core.reconstructor (BackupError, require_crypto), cryptography (only
+Depends on: core.errors, core.crypto_backend, cryptography (only
 for encrypted archives).
 
 ── The format, as written by AOSP ─────────────────────────────────────────────
@@ -48,7 +48,8 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from config.settings import CHUNK_SIZE
-from core.reconstructor import BackupError, require_crypto
+from core.crypto_backend import require_crypto
+from core.errors import BackupError
 
 AB_MAGIC = b"ANDROID BACKUP\n"
 # Highest archive version AOSP writes (UserBackupManagerService.BACKUP_FILE_VERSION).

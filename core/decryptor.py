@@ -2,9 +2,10 @@
 
 Defines: `decrypt_backup` and the helpers that rewrite a backup's metadata so the
 result is a structurally valid UNENCRYPTED backup.
-Used by: core.reconstructor (the `--mode decrypt` path), gui.interface.
-Depends on: core.reconstructor (shared manifest, traceability and staging
-machinery), core.models, config.settings.
+Used by: launcher.cli (the `--mode decrypt` path), gui.interface.
+Depends on: core.ios_backup, core.ios_crypto, core.ios_reconstructor (output
+validation), core.traceability, core.run_control, core.output_paths,
+core.crypto_backend, core.errors, config.settings.
 
 WHY this is a separate operation from reconstruction: rebuilding renames every
 file into a device-like tree, which is a derived view. Decryption produces the
@@ -47,29 +48,25 @@ from pathlib import Path
 from typing import Any
 
 from config.settings import CHUNK_SIZE, OPTIONAL_BACKUP_FILES, TOOL_NAME, TOOL_VERSION
-from core.reconstructor import (
-    BackupError,
-    CancelEvent,
-    Keybag,
-    ProgressCallback,
+from core.crypto_backend import require_crypto
+from core.errors import BackupError
+from core.ios_backup import (
     count_manifest_rows,
     first_present,
-    is_cancelled,
     iter_manifest_rows,
-    long_path,
     metadata_size,
     parse_file_metadata,
     plist_data_value,
-    prepare_manifest_db,
     read_optional_plist,
     read_plist,
-    report_progress,
-    require_crypto,
     resolve_backup_dir,
     source_path_for_file_id,
-    validate_output_target,
-    write_trace_folder,
 )
+from core.ios_crypto import Keybag, prepare_manifest_db
+from core.ios_reconstructor import validate_output_target
+from core.output_paths import long_path
+from core.run_control import CancelEvent, ProgressCallback, is_cancelled, report_progress
+from core.traceability import write_trace_folder
 
 _LOG = logging.getLogger(__name__)
 

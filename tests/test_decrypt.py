@@ -21,8 +21,8 @@ from pathlib import Path
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.keywrap import aes_key_wrap
 
-from core import decryptor
-from core import reconstructor as recon
+from config import settings
+from core import decryptor, errors, ios_crypto
 
 PASSWORD = "1234"
 PROTECTION_CLASS = 3
@@ -254,7 +254,7 @@ class DecryptTests(unittest.TestCase):
             out = root / "decrypted"
             decryptor.decrypt_backup(backup, out, password=PASSWORD, allow_password_prompt=False)
 
-            manifest = (out / recon.TRACEABILITY_DIR_NAME / recon.TRACEABILITY_FILE_MANIFEST_NAME).read_text()
+            manifest = (out / settings.TRACEABILITY_DIR_NAME / settings.TRACEABILITY_FILE_MANIFEST_NAME).read_text()
             self.assertIn("manifest_digest_original", manifest)
             self.assertIn("manifest_digest_rewritten", manifest)
             # The rewrite must be auditable: the original ciphertext digest is kept.
@@ -266,7 +266,7 @@ class DecryptTests(unittest.TestCase):
             ).hexdigest()
             self.assertIn(original, manifest)
 
-            provenance = (out / recon.TRACEABILITY_DIR_NAME / recon.TRACEABILITY_PROVENANCE_NAME).read_text()
+            provenance = (out / settings.TRACEABILITY_DIR_NAME / settings.TRACEABILITY_PROVENANCE_NAME).read_text()
             self.assertIn("rewritten_metadata", provenance)
 
     def test_decrypt_works_without_status_plist(self):
@@ -299,7 +299,7 @@ class DecryptTests(unittest.TestCase):
             conn.commit()
             conn.close()
 
-            with self.assertRaises(recon.BackupError) as caught:
+            with self.assertRaises(errors.BackupError) as caught:
                 decryptor.decrypt_backup(backup, root / "out", allow_password_prompt=False)
             self.assertIn("not encrypted", str(caught.exception))
 
@@ -312,7 +312,7 @@ class DecryptTests(unittest.TestCase):
         """
         for with_uuid in (True, False):
             with self.subTest(per_class_uuid=with_uuid):
-                keybag = recon.Keybag(keybag_blob(with_class_uuid=with_uuid))
+                keybag = ios_crypto.Keybag(keybag_blob(with_class_uuid=with_uuid))
                 self.assertIn(PROTECTION_CLASS, keybag.class_keys)
                 keybag.unlock(PASSWORD)
                 self.assertEqual(keybag.class_keys[PROTECTION_CLASS][b"KEY"], CLASS_KEY)
@@ -328,8 +328,8 @@ class DecryptTests(unittest.TestCase):
                 tlv(b"DPIC", struct.pack(">I", DPIC)),
             ]
         )
-        with self.assertRaises(recon.BackupError) as caught:
-            recon.Keybag(header_only).unlock(PASSWORD)
+        with self.assertRaises(errors.BackupError) as caught:
+            ios_crypto.Keybag(header_only).unlock(PASSWORD)
         self.assertIn("malformed", str(caught.exception).lower())
 
 

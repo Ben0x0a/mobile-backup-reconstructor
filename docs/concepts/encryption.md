@@ -2,7 +2,7 @@
 
 ## Where this lives in the code
 
-Each step below is implemented in `core/reconstructor.py`; the names are stable
+Each step below is implemented in `core/ios_crypto.py`; the names are stable
 entry points if you want to read along:
 
 | Step | Implementation |

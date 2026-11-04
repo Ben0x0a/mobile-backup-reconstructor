@@ -5,8 +5,9 @@ Defines: the archive-path -> device-path mapping (`load_android_map`,
 Android provenance and root summary, and `reconstruct_android_backup`.
 Used by: core.reconstructor (`reconstruct_backup` dispatches here on an `.ab` input).
 Depends on: core.android_backup, core.ffs_archive, core.output_paths,
-core.reconstructor (shared errors, password prompt policy, traceability
-helpers), core.models, config.settings, config/android_maps (package data).
+core.errors, core.ios_domain_map (YAML fallback parser), core.package_resources,
+core.run_control, core.traceability, core.models, config.settings,
+config/android_maps (package data).
 
 An `.ab` carries no file table like iOS's Manifest.db: the tar member names ARE
 the index (`apps/<package>/<token>/<path>`, `shared/<volume>/<path>`). Each
@@ -42,6 +43,7 @@ from config.settings import (
     TRACEABILITY_FILE_MANIFEST_NAME,
 )
 from core.android_backup import PAYLOAD_ERRORS, AbHeader, open_ab_tar, read_ab_header_from
+from core.errors import BackupError, ReconstructionFailedError
 from core.ffs_archive import (
     FfsZipWriter,
     TraceSection,
@@ -49,24 +51,20 @@ from core.ffs_archive import (
     write_root_traceability_text,
     write_zip_sha256_sidecar,
 )
+from core.ios_domain_map import parse_simple_domain_yaml
 from core.models import ReconstructionResult
 from core.output_paths import safe_join_path
-from core.reconstructor import (
-    _RESOURCE_STACK,
-    BackupError,
+from core.package_resources import _RESOURCE_STACK
+from core.run_control import (
     CancelEvent,
     ProgressCallback,
-    ReconstructionFailedError,
     is_cancelled,
     make_staging_dir,
-    parse_simple_domain_yaml,
     promote_zip_output,
     remove_staging_dir,
     report_progress,
-    sha256_file,
-    write_failure_report,
-    write_trace_zip,
 )
+from core.traceability import sha256_file, write_failure_report, write_trace_zip
 
 _LOG = logging.getLogger(__name__)
 

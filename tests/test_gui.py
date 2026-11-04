@@ -4,7 +4,7 @@ Defines: construction of the main window, its default state, output-path
 composition, the worker lifecycle, and an end-to-end reconstruction driven
 through the worker with progress and cancellation.
 Used by: pytest / unittest discovery.
-Depends on: gui.interface, core.reconstructor, PySide6.
+Depends on: gui.interface, config.settings, PySide6.
 
 These run headless under the offscreen Qt platform, which is set before the
 first PySide6 import because QApplication picks its platform plugin once.
@@ -27,7 +27,7 @@ try:
 except ImportError:  # pragma: no cover - exercised only where PySide6 is absent
     PYSIDE_AVAILABLE = False
 
-from core import reconstructor as recon
+from config import settings
 
 
 def build_backup(root: Path, file_count: int = 6) -> Path:
@@ -92,7 +92,7 @@ class GuiTests(unittest.TestCase):
         window = self.make_window()
         self.assertEqual(window.output_name.text(), "reconstructed")
         # The configured default layout must be preselected, not merely first.
-        self.assertEqual(window._selected_output_layout(), recon.DEFAULT_OUTPUT_LAYOUT)
+        self.assertEqual(window._selected_output_layout(), settings.DEFAULT_OUTPUT_LAYOUT)
         self.assertFalse(window.cancel_button.isEnabled())
         self.assertTrue(window.progress.isHidden(), "the bar starts hidden until a run reports")
 
@@ -205,7 +205,7 @@ class GuiTests(unittest.TestCase):
             self.assertEqual(results[0]["stats"]["records"], 5)
             written = list((output / "HomeDomain" / "Library").glob("*.bin"))
             self.assertEqual(len(written), 5)
-            manifest = output / recon.TRACEABILITY_DIR_NAME / recon.TRACEABILITY_FILE_MANIFEST_NAME
+            manifest = output / settings.TRACEABILITY_DIR_NAME / settings.TRACEABILITY_FILE_MANIFEST_NAME
             self.assertTrue(manifest.is_file(), "a cancelled run must still be attributable")
 
     def test_threaded_reconstruction_end_to_end(self):
@@ -273,7 +273,7 @@ class GuiTests(unittest.TestCase):
             rebuilt = root / "rebuilt" / "HomeDomain" / "Library"
             self.assertEqual(len(list(rebuilt.glob("*.bin"))), 8)
             self.assertTrue(
-                (root / "rebuilt" / recon.TRACEABILITY_DIR_NAME / recon.TRACEABILITY_PROVENANCE_NAME).is_file()
+                (root / "rebuilt" / settings.TRACEABILITY_DIR_NAME / settings.TRACEABILITY_PROVENANCE_NAME).is_file()
             )
 
     def test_reconstruct_works_without_clicking_check_encryption_first(self):

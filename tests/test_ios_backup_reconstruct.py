@@ -21,7 +21,8 @@ from pathlib import Path
 from unittest import mock
 
 from config import settings
-from core import reconstructor as recon
+from core import errors, ios_backup, ios_crypto, ios_domain_map, models, output_paths, traceability
+from launcher import cli
 
 
 def run_cli(argv: list[str]) -> tuple[int, str]:
@@ -41,7 +42,7 @@ def run_cli(argv: list[str]) -> tuple[int, str]:
     previous_level = root.level
     try:
         with contextlib.redirect_stdout(io.StringIO()):
-            rc = recon.main(argv)
+            rc = cli.main(argv)
     finally:
         root.removeHandler(handler)
         root.setLevel(previous_level)
@@ -112,7 +113,7 @@ class ReconstructionTests(unittest.TestCase):
             backup, _ = self.make_backup(Path(tmp))
             with (backup / "Manifest.plist").open("wb") as fh:
                 plistlib.dump({"IsEncrypted": True}, fh)
-            with mock.patch("core.reconstructor.require_crypto", side_effect=AssertionError("crypto used")):
+            with mock.patch("core.ios_crypto.require_crypto", side_effect=AssertionError("crypto used")):
                 rc, _ = run_cli([str(backup), "unused", "--info-only"])
             self.assertEqual(rc, 0)
 
@@ -204,32 +205,34 @@ class ReconstructionTests(unittest.TestCase):
             self.assertEqual(zip_paths["Library/SMS/sms.db"], "private/var/mobile/Library/SMS/sms.db")
             for zip_path in zip_paths.values():
                 self.assertIn(zip_path, names)
-            self.assertIn(recon.sha256_file(backup / "Manifest.plist"), summary)
+            self.assertIn(traceability.sha256_file(backup / "Manifest.plist"), summary)
             self.assertIn(settings.TOOL_NAME, summary)
             sidecar = root / f"out.zip{settings.ZIP_HASH_SIDECAR_SUFFIX}"
-            self.assertEqual(sidecar.read_text(), f"{recon.sha256_file(output)}  out.zip\n")
+            self.assertEqual(sidecar.read_text(), f"{traceability.sha256_file(output)}  out.zip\n")
 
     def test_filesystem_domain_mapping(self):
         self.assertEqual(
-            recon.mapped_output_path("AppDomain-com.example.app", "Library/test.db", "filesystem").as_posix(),
+            ios_domain_map.mapped_output_path("AppDomain-com.example.app", "Library/test.db", "filesystem").as_posix(),
             "private/var/mobile/Containers/Data/Application/com.example.app/Library/test.db",
         )
         self.assertEqual(
-            recon.mapped_output_path(
+            ios_domain_map.mapped_output_path(
                 "SysSharedContainerDomain-systemgroup.example", "data.db", "filesystem"
             ).as_posix(),
             "private/var/containers/Shared/SystemGroup/systemgroup.example/data.db",
         )
         self.assertEqual(
-            recon.mapped_output_path("HealthDomain", "Health/healthdb.sqlite", "filesystem").as_posix(),
+            ios_domain_map.mapped_output_path("HealthDomain", "Health/healthdb.sqlite", "filesystem").as_posix(),
             "private/var/mobile/Library/Health/healthdb.sqlite",
         )
         self.assertEqual(
-            recon.mapped_output_path("HomeKitDomain", "Library/homed/datastore.sqlite", "filesystem").as_posix(),
+            ios_domain_map.mapped_output_path(
+                "HomeKitDomain", "Library/homed/datastore.sqlite", "filesystem"
+            ).as_posix(),
             "private/var/mobile/Library/homed/datastore.sqlite",
         )
         self.assertEqual(
-            recon.mapped_output_path(
+            ios_domain_map.mapped_output_path(
                 "KeyboardDomain", "Library/Keyboard/user_model_database.sqlite", "filesystem"
             ).as_posix(),
             "private/var/mobile/Library/Keyboard/user_model_database.sqlite",
@@ -261,7 +264,7 @@ class ReconstructionTests(unittest.TestCase):
         ]
         for domain, relative_path, expected in cases:
             with self.subTest(domain=domain, relative_path=relative_path):
-                mapped = recon.mapped_output_path(domain, relative_path, "filesystem").as_posix()
+                mapped = ios_domain_map.mapped_output_path(domain, relative_path, "filesystem").as_posix()
                 self.assertEqual(mapped, expected)
                 segments = mapped.split("/")
                 doubled = [a for a, b in zip(segments, segments[1:], strict=False) if a == b]
@@ -286,13 +289,13 @@ class ReconstructionTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            domain_map = recon.load_domain_mounts(mapping)
+            domain_map = ios_domain_map.load_domain_mounts(mapping)
             self.assertEqual(
-                recon.mapped_output_path("HomeDomain", "Library/test.db", "filesystem", domain_map).as_posix(),
+                ios_domain_map.mapped_output_path("HomeDomain", "Library/test.db", "filesystem", domain_map).as_posix(),
                 "custom/mobile/Library/test.db",
             )
             self.assertEqual(
-                recon.mapped_output_path(
+                ios_domain_map.mapped_output_path(
                     "AppDomain-com.example", "Documents/a.txt", "filesystem", domain_map
                 ).as_posix(),
                 "custom/apps/com.example/Documents/a.txt",
@@ -331,10 +334,10 @@ class ReconstructionTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            domain_map = recon.load_domain_mounts(root, "14.0.1")
+            domain_map = ios_domain_map.load_domain_mounts(root, "14.0.1")
             self.assertEqual(domain_map["name"], "Current map")
             self.assertEqual(
-                recon.mapped_output_path("HomeDomain", "Library/test.db", "filesystem", domain_map).as_posix(),
+                ios_domain_map.mapped_output_path("HomeDomain", "Library/test.db", "filesystem", domain_map).as_posix(),
                 "current/mobile/Library/test.db",
             )
 
@@ -343,7 +346,7 @@ class ReconstructionTests(unittest.TestCase):
             root = Path(tmp)
             backup, _ = self.make_backup(root)
             output = root / "out.zip"
-            with mock.patch("core.reconstructor.copy_plain", side_effect=RuntimeError("copy failed")):
+            with mock.patch("core.ios_reconstructor.copy_plain", side_effect=RuntimeError("copy failed")):
                 rc, stderr_text = run_cli([str(backup), str(output), "--format", "zip"])
             self.assertEqual(rc, 1)
             self.assertFalse(output.exists())
@@ -358,7 +361,7 @@ class ReconstructionTests(unittest.TestCase):
             root = Path(tmp)
             backup, _ = self.make_backup(root)
             output = root / "out.zip"
-            with mock.patch("core.reconstructor.copy_plain", side_effect=RuntimeError("copy failed")):
+            with mock.patch("core.ios_reconstructor.copy_plain", side_effect=RuntimeError("copy failed")):
                 rc, _ = run_cli([str(backup), str(output), "--format", "zip", "--continue-on-error"])
             self.assertEqual(rc, 2)
             self.assertTrue(output.exists())
@@ -434,8 +437,8 @@ class ReconstructionTests(unittest.TestCase):
         self.assertIn(settings.TOOL_NAME, settings.TRACEABILITY_FILE_MANIFEST_NAME)
 
     def test_mode_defaults_to_rebuild(self):
-        self.assertEqual(recon.parse_args(["backup", "output"]).mode, "rebuild")
-        self.assertEqual(recon.parse_args(["backup", "output", "--mode", "decrypt"]).mode, "decrypt")
+        self.assertEqual(cli.parse_args(["backup", "output"]).mode, "rebuild")
+        self.assertEqual(cli.parse_args(["backup", "output", "--mode", "decrypt"]).mode, "decrypt")
 
     def test_flags_with_no_meaning_in_decrypt_mode_are_refused(self):
         """Silently ignoring them would hand the operator an output they did not
@@ -443,14 +446,14 @@ class ReconstructionTests(unittest.TestCase):
         for flag in (["--layout", "filesystem"], ["--domain-map", "x"], ["--format", "zip"]):
             with self.subTest(flag=flag[0]):
                 argv = ["backup", "output", "--mode", "decrypt", *flag]
-                args = recon.parse_args(argv)
-                with self.assertRaises(recon.BackupError) as caught:
-                    recon.reject_conflicting_mode_flags(args, argv)
+                args = cli.parse_args(argv)
+                with self.assertRaises(errors.BackupError) as caught:
+                    cli.reject_conflicting_mode_flags(args, argv)
                 self.assertIn(flag[0], str(caught.exception))
 
     def test_rebuild_mode_accepts_every_flag(self):
         argv = ["backup", "output", "--layout", "filesystem", "--format", "zip"]
-        recon.reject_conflicting_mode_flags(recon.parse_args(argv), argv)
+        cli.reject_conflicting_mode_flags(cli.parse_args(argv), argv)
 
     def test_backup_without_the_optional_plists_still_reconstructs(self):
         """Older backups may carry no Status.plist (and no Info.plist).
@@ -511,8 +514,8 @@ class ReconstructionTests(unittest.TestCase):
                 root = Path(tmp)
                 backup, _ = self.make_backup(root)
                 (backup / name).unlink()
-                with self.assertRaises(recon.BackupError) as caught:
-                    recon.resolve_backup_dir(backup)
+                with self.assertRaises(errors.BackupError) as caught:
+                    ios_backup.resolve_backup_dir(backup)
                 self.assertIn(name, str(caught.exception))
 
     def test_a_present_but_malformed_optional_plist_still_raises(self):
@@ -522,13 +525,13 @@ class ReconstructionTests(unittest.TestCase):
             backup, _ = self.make_backup(root)
             (backup / "Status.plist").write_bytes(b"not a plist at all")
             with self.assertRaises(plistlib.InvalidFileException):
-                recon.read_optional_plist(backup / "Status.plist")
+                ios_backup.read_optional_plist(backup / "Status.plist")
 
             # A plist that parses but is not a dictionary is also a problem.
             with (backup / "Status.plist").open("wb") as fh:
                 plistlib.dump(["not", "a", "dict"], fh)
-            with self.assertRaises(recon.BackupError):
-                recon.read_optional_plist(backup / "Status.plist")
+            with self.assertRaises(errors.BackupError):
+                ios_backup.read_optional_plist(backup / "Status.plist")
 
     def test_an_unreadable_backup_fails_with_an_actionable_message(self):
         """Some acquisition tools write the backup mode 000 — unreadable even by
@@ -543,8 +546,8 @@ class ReconstructionTests(unittest.TestCase):
             try:
                 if os.access(target, os.R_OK):
                     self.skipTest("cannot drop read permission here (running as root?)")
-                with self.assertRaises(recon.BackupError) as caught:
-                    recon.resolve_backup_dir(backup)
+                with self.assertRaises(errors.BackupError) as caught:
+                    ios_backup.resolve_backup_dir(backup)
                 message = str(caught.exception)
                 self.assertIn("Manifest.db", message)
                 self.assertIn("permission denied", message.lower())
@@ -570,14 +573,14 @@ class ReconstructionTests(unittest.TestCase):
         ]
         for segment in keep:
             with self.subTest(segment=segment):
-                self.assertEqual(recon.sanitise_segment(segment), segment)
+                self.assertEqual(output_paths.sanitise_segment(segment), segment)
 
         # Trailing dots/spaces are still removed (Windows rejects them).
-        self.assertEqual(recon.sanitise_segment("trailing."), "trailing")
-        self.assertEqual(recon.sanitise_segment("trailing "), "trailing")
-        self.assertEqual(recon.sanitise_segment(".both. "), ".both")
+        self.assertEqual(output_paths.sanitise_segment("trailing."), "trailing")
+        self.assertEqual(output_paths.sanitise_segment("trailing "), "trailing")
+        self.assertEqual(output_paths.sanitise_segment(".both. "), ".both")
         # A segment that is only dots/spaces still yields a usable name.
-        self.assertEqual(recon.sanitise_segment("  "), "_")
+        self.assertEqual(output_paths.sanitise_segment("  "), "_")
 
     def test_dotfiles_survive_a_full_reconstruction(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -604,7 +607,9 @@ class ReconstructionTests(unittest.TestCase):
                     "m/middle.bin": (b"m", 1),
                 },
             )
-            names = [f"{domain}/{rel}" for _, domain, rel, _, _ in recon.iter_manifest_rows(backup / "Manifest.db")]
+            names = [
+                f"{domain}/{rel}" for _, domain, rel, _, _ in ios_backup.iter_manifest_rows(backup / "Manifest.db")
+            ]
             self.assertEqual(names, sorted(names))
 
     def test_a_path_over_the_windows_limit_is_still_written(self):
@@ -629,7 +634,7 @@ class ReconstructionTests(unittest.TestCase):
             self.assertEqual(rc, 0, "a long destination must not fail the run")
 
             written = output / "HomeDomain" / Path(deep)
-            self.assertTrue(len(str(written)) > recon.WINDOWS_MAX_PATH, "the test path must be over the limit")
+            self.assertTrue(len(str(written)) > output_paths.WINDOWS_MAX_PATH, "the test path must be over the limit")
             self.assertTrue(written.is_file(), f"not written: {written}")
             self.assertEqual(written.read_bytes(), b"x" * 16)
 
@@ -643,40 +648,40 @@ class ReconstructionTests(unittest.TestCase):
     def test_long_path_is_a_no_op_off_windows(self):
         p = Path("/tmp/some/path")
         if os.name == "nt":
-            self.assertTrue(str(recon.long_path(p)).startswith("\\\\?\\"))
+            self.assertTrue(str(output_paths.long_path(p)).startswith("\\\\?\\"))
         else:
-            self.assertEqual(recon.long_path(p), p)
+            self.assertEqual(output_paths.long_path(p), p)
 
     def test_version_flag(self):
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout), self.assertRaises(SystemExit):
-            recon.parse_args(["--version"])
+            cli.parse_args(["--version"])
         self.assertIn(settings.TOOL_VERSION, stdout.getvalue())
 
     def test_password_redaction(self):
         self.assertEqual(
-            recon.redact_password_args(["tool", "-p", "secret", "--password=also-secret"]),
+            cli.redact_password_args(["tool", "-p", "secret", "--password=also-secret"]),
             ["tool", "-p", "<redacted>", "--password=<redacted>"],
         )
 
     def test_cli_rejects_password_argument(self):
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
-                recon.parse_args(["backup", "output", "-p", "secret"])
+                cli.parse_args(["backup", "output", "-p", "secret"])
 
     def test_file_key_uses_nsdata_and_protection_class(self):
-        record = recon.FileRecord(
+        record = models.FileRecord(
             file_id="a" * 40,
             domain="HomeDomain",
             relative_path="Library/test.db",
             flags=1,
             metadata={"ProtectionClass": 7, "EncryptionKey": {"NS.data": b"HEAD" + b"x" * 40}},
             source_path=Path("unused"),
-            output_path=recon.safe_output_path("HomeDomain", "Library/test.db"),
+            output_path=output_paths.safe_output_path("HomeDomain", "Library/test.db"),
         )
         keybag = mock.Mock()
         keybag.unwrap_key.return_value = b"file-key"
-        self.assertEqual(recon.file_key_for_record(record, keybag), b"file-key")
+        self.assertEqual(ios_crypto.file_key_for_record(record, keybag), b"file-key")
         keybag.unwrap_key.assert_called_once_with(7, b"x" * 40)
 
     def test_encrypted_backup_without_a_tty_fails_cleanly(self):
@@ -693,7 +698,7 @@ class ReconstructionTests(unittest.TestCase):
             }.items():
                 (backup / name).write_bytes(plistlib.dumps(payload))
             (backup / "Manifest.db").write_bytes(b"encrypted")
-            with mock.patch("core.reconstructor.require_crypto"), mock.patch("sys.stdin") as stdin:
+            with mock.patch("core.ios_crypto.require_crypto"), mock.patch("sys.stdin") as stdin:
                 stdin.isatty.return_value = False
                 rc, logged = run_cli([str(backup), str(root / "out")])
             self.assertEqual(rc, 1)
@@ -710,21 +715,21 @@ class ReconstructionTests(unittest.TestCase):
 
             def fake_unlock(_blob, password):
                 attempts.append(password)
-                raise recon.BackupError("bad password")
+                raise errors.BackupError("bad password")
 
             with (
-                mock.patch("core.reconstructor.require_crypto"),
-                mock.patch("core.reconstructor.try_unlock_keybag", side_effect=fake_unlock),
+                mock.patch("core.ios_crypto.require_crypto"),
+                mock.patch("core.ios_crypto.try_unlock_keybag", side_effect=fake_unlock),
             ):
-                with self.assertRaises(recon.BackupError) as caught:
-                    recon.prepare_manifest_db(backup, True, manifest, None, allow_prompt=False)
+                with self.assertRaises(errors.BackupError) as caught:
+                    ios_crypto.prepare_manifest_db(backup, True, manifest, None, allow_prompt=False)
 
             self.assertEqual(attempts, [])
             self.assertIn("--try-default-passwords", str(caught.exception))
 
     def test_try_default_passwords_flag_defaults_to_off(self):
-        self.assertFalse(recon.parse_args(["backup", "output"]).try_default_passwords)
-        self.assertTrue(recon.parse_args(["backup", "output", "--try-default-passwords"]).try_default_passwords)
+        self.assertFalse(cli.parse_args(["backup", "output"]).try_default_passwords)
+        self.assertTrue(cli.parse_args(["backup", "output", "--try-default-passwords"]).try_default_passwords)
 
     def test_default_passwords_tried_when_opted_in(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -739,17 +744,17 @@ class ReconstructionTests(unittest.TestCase):
                 attempts.append(password)
                 if password == "123456":
                     return object()
-                raise recon.BackupError("bad password")
+                raise errors.BackupError("bad password")
 
             with (
-                mock.patch("core.reconstructor.require_crypto"),
-                mock.patch("core.reconstructor.try_unlock_keybag", side_effect=fake_unlock),
-                mock.patch("core.reconstructor.decrypt_manifest_db", return_value=b"SQLite format 3\x00"),
+                mock.patch("core.ios_crypto.require_crypto"),
+                mock.patch("core.ios_crypto.try_unlock_keybag", side_effect=fake_unlock),
+                mock.patch("core.ios_crypto.decrypt_manifest_db", return_value=b"SQLite format 3\x00"),
                 # The default-password unlock logs a warning by design; keep it
                 # out of the test report.
-                mock.patch("core.reconstructor._LOG"),
+                mock.patch("core.ios_crypto._LOG"),
             ):
-                db_path, tmp_dir, keybag = recon.prepare_manifest_db(
+                db_path, tmp_dir, keybag = ios_crypto.prepare_manifest_db(
                     backup, True, manifest, None, allow_prompt=False, try_default_passwords=True
                 )
                 try:

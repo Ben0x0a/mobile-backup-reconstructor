@@ -3,8 +3,8 @@
 Defines: path-segment sanitising (Windows-illegal characters and reserved
 names), safe joining of device paths, collision-free path claiming, and the
 Windows long-path helpers.
-Used by: core.reconstructor (iOS), core.android_reconstructor, core.ffs_archive,
-core.decryptor (through core.reconstructor).
+Used by: core.ios_reconstructor, core.ios_domain_map, core.android_reconstructor,
+core.ffs_archive, core.traceability, core.run_control, core.decryptor, launcher.cli.
 Depends on: nothing outside the standard library.
 
 WHY a module of its own: both the iOS and the Android pipelines turn device

@@ -51,7 +51,7 @@ the `cryptography` package.
 ```python
 from pathlib import Path
 
-from core.reconstructor import iter_file_records, resolve_backup_dir
+from core.ios_backup import iter_file_records, resolve_backup_dir
 
 backup_dir = resolve_backup_dir(Path("/path/to/ios-backup"))
 for record in iter_file_records(backup_dir, backup_dir / "Manifest.db"):
@@ -59,7 +59,7 @@ for record in iter_file_records(backup_dir, backup_dir / "Manifest.db"):
 ```
 
 This works directly only on an unencrypted backup; for an encrypted one, obtain
-the decrypted manifest from `prepare_manifest_db` first.
+the decrypted manifest from `core.ios_crypto.prepare_manifest_db` first.
 
 ## Errors
 
@@ -73,7 +73,7 @@ All expected failures raise `BackupError` or a subclass:
 
 ```python
 from core import BackupError
-from core.reconstructor import ReconstructionFailedError
+from core.errors import ReconstructionFailedError
 
 try:
     result = reconstruct_backup(...)
@@ -85,6 +85,7 @@ except BackupError as exc:
 
 ## Logging
 
-The engine logs diagnostics through the standard `logging` module under the
-`core.reconstructor` logger and never calls `print` for diagnostics. Configure
+The engine logs diagnostics through the standard `logging` module, one logger
+per module under the `core` package (configure `core` to catch them all), and
+never calls `print` for diagnostics. Configure
 handlers as you would for any library.
