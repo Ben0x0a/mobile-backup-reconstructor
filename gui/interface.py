@@ -1,4 +1,4 @@
-"""PySide6 GUI interface for iOS backup reconstruction.
+"""PySide6 GUI interface for iOS and Android backup reconstruction.
 
 Defines: the main window, its drag-and-drop path fields, and the background
 workers that run inspection and reconstruction off the UI thread.
@@ -14,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from config.settings import DEFAULT_OUTPUT_LAYOUT
+from config.settings import DEFAULT_OUTPUT_LAYOUT, FFS_LAYOUT
 from core.decryptor import decrypt_backup
 from core.reconstructor import inspect_backup, reconstruct_backup
 
@@ -182,11 +182,11 @@ def _widget_classes() -> SimpleNamespace:
             self.last_backup_info: dict[str, Any] | None = None
             # Set when a reconstruction is waiting on an inspect pass to finish.
             self._pending_reconstruct = False
-            self.setWindowTitle("iOS Backup Reconstructor")
+            self.setWindowTitle("Mobile Backup Reconstructor")
             self.resize(760, 420)
 
             self.input_path = DropPathEdit("input")
-            self.input_path.setPlaceholderText("Drop iOS backup folder or Manifest.plist")
+            self.input_path.setPlaceholderText("Drop an iOS backup folder or Manifest.plist, or an Android .ab file")
             self.output_folder = DropPathEdit("output")
             self.output_folder.setPlaceholderText("Drop output folder")
             self.output_type = QtWidgets.QComboBox()
@@ -195,14 +195,15 @@ def _widget_classes() -> SimpleNamespace:
             # Radio buttons rather than a dropdown: there are exactly two modes and
             # they do different things to the output, so both should be visible at
             # once instead of one hiding behind a click.
-            self.mode_rebuild = QtWidgets.QRadioButton("Rebuild into a folder tree")
+            self.mode_rebuild = QtWidgets.QRadioButton("Reconstruct structure like a Full File System acquisition")
             self.mode_rebuild.setToolTip(
-                "Write every file to the path it had on the device, decrypting first when the backup is encrypted."
+                "Write every file to the path it had on the device, as in a Full File System extraction, "
+                "decrypting first when the backup is encrypted. iOS and Android (.ab) backups."
             )
-            self.mode_decrypt = QtWidgets.QRadioButton("Decrypt only — keep the backup layout")
+            self.mode_decrypt = QtWidgets.QRadioButton("Decrypt only — keep the iOS backup layout")
             self.mode_decrypt.setToolTip(
-                "Write the same backup with its content in the clear, so other tools "
-                "that cannot decrypt can read it. Requires an encrypted backup."
+                "Write the same iOS backup with its content in the clear, so other tools "
+                "that cannot decrypt can read it. Requires an encrypted iOS backup."
             )
             self.mode_rebuild.setChecked(True)
             # A group makes the exclusivity explicit rather than relying on the two
@@ -211,8 +212,8 @@ def _widget_classes() -> SimpleNamespace:
             self.mode_group.addButton(self.mode_rebuild)
             self.mode_group.addButton(self.mode_decrypt)
             self.output_layout = QtWidgets.QComboBox()
-            self.output_layout.addItem("Filesystem-like", "filesystem")
-            self.output_layout.addItem("Backup domains", "backup")
+            self.output_layout.addItem("Full File System-like (zip)", FFS_LAYOUT)
+            self.output_layout.addItem("iOS backup domains", "backup")
             self.output_layout.setCurrentIndex(self.output_layout.findData(DEFAULT_OUTPUT_LAYOUT))
             self.output_name = QtWidgets.QLineEdit("reconstructed")
             self.password = QtWidgets.QLineEdit()
@@ -282,7 +283,7 @@ def _widget_classes() -> SimpleNamespace:
             self.input_path.textChanged.connect(self._clear_backup_info)
             self.mode_group.buttonToggled.connect(self._mode_changed)
             self.output_type.currentIndexChanged.connect(self._update_preview)
-            self.output_layout.currentIndexChanged.connect(self._update_preview)
+            self.output_layout.currentIndexChanged.connect(self._layout_changed)
             self.output_folder.textChanged.connect(self._update_preview)
             self.output_name.textChanged.connect(self._update_preview)
 
@@ -291,7 +292,14 @@ def _widget_classes() -> SimpleNamespace:
             self._pending_reconstruct = False
 
         def _choose_input(self) -> None:
-            path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select iOS backup folder")
+            # A file dialog rather than a folder one: it covers both inputs — an
+            # iOS backup through its Manifest.plist, and an Android .ab file.
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self,
+                "Select an iOS Manifest.plist or an Android .ab backup",
+                "",
+                "Mobile backups (Manifest.plist *.ab);;All files (*)",
+            )
             if path:
                 self.input_path.setText(path)
 
@@ -319,8 +327,20 @@ def _widget_classes() -> SimpleNamespace:
             """
             decrypting = self._selected_mode() == "decrypt"
             self.output_layout.setEnabled(not decrypting)
-            self.output_type.setEnabled(not decrypting)
+            self._layout_changed()
             self.reconstruct_button.setText("Decrypt" if decrypting else "Reconstruct")
+            self._update_preview()
+
+        def _layout_changed(self) -> None:
+            """The Full File System-like layout is always a zip; show it, and lock it.
+
+            WHY: its device paths exceed Windows' path limit as a folder tree, so
+            the engine refuses a folder for it — the control must not offer one.
+            """
+            ffs = self._selected_output_layout() == FFS_LAYOUT
+            if ffs:
+                self.output_type.setCurrentIndex(self.output_type.findData("zip"))
+            self.output_type.setEnabled(not ffs and self._selected_mode() != "decrypt")
             self._update_preview()
 
         def _output_path(self) -> Path:
@@ -365,9 +385,15 @@ def _widget_classes() -> SimpleNamespace:
 
         def _on_progress(self, done: int, total: int, path: str) -> None:
             self.progress.setVisible(True)
-            self.progress.setMaximum(max(total, 1))
+            if total <= 0:
+                # An Android .ab is a tar stream: its file count is unknown until
+                # the end, so show a busy bar and a running count instead.
+                self.progress.setMaximum(0)
+                self.status.setPlainText(f"Reconstructing...\n{done} files\n{path}")
+                return
+            self.progress.setMaximum(total)
             self.progress.setValue(done)
-            self.progress.setFormat(f"%v / %m  ({done * 100 // max(total, 1)}%)")
+            self.progress.setFormat(f"%v / %m  ({done * 100 // total}%)")
             self.status.setPlainText(f"Reconstructing...\n{done} of {total}\n{path}")
 
         def _inspect_backup(self) -> None:
@@ -407,6 +433,13 @@ def _widget_classes() -> SimpleNamespace:
                 )
                 return
             mode = self._selected_mode()
+            if mode == "decrypt" and info.get("platform") == "android":
+                self._set_status(
+                    "Decrypt only applies to iOS backups. An encrypted Android backup is decrypted "
+                    "during the reconstruction: switch the mode to Reconstruct.",
+                    append=False,
+                )
+                return
             if mode == "decrypt" and not info.get("encrypted"):
                 self._set_status(
                     "This backup is not encrypted, so there is nothing to decrypt. Switch the mode to Rebuild.",
@@ -480,14 +513,23 @@ def _widget_classes() -> SimpleNamespace:
                 # have its thread reference cleared by that teardown.
                 if self._pending_reconstruct:
                     return
-                lines = [
-                    "Backup checked.",
-                    f"Path: {payload.get('backup')}",
-                    f"Device: {payload.get('device') or 'unknown'}",
-                    f"Product: {payload.get('product') or 'unknown'}",
-                    f"iOS: {payload.get('ios') or 'unknown'}",
-                    f"Encrypted: {payload.get('encrypted')}",
-                ]
+                if payload.get("platform") == "android":
+                    lines = [
+                        "Backup checked: Android adb backup (.ab).",
+                        f"Path: {payload.get('backup')}",
+                        f"Format version: {payload.get('format_version')}",
+                        f"Compressed: {payload.get('compressed')}",
+                        f"Encrypted: {payload.get('encrypted')}",
+                    ]
+                else:
+                    lines = [
+                        "Backup checked: iOS backup.",
+                        f"Path: {payload.get('backup')}",
+                        f"Device: {payload.get('device') or 'unknown'}",
+                        f"Product: {payload.get('product') or 'unknown'}",
+                        f"iOS: {payload.get('ios') or 'unknown'}",
+                        f"Encrypted: {payload.get('encrypted')}",
+                    ]
                 self._set_status("\n".join(lines), append=False)
                 return
             stats = payload.get("stats", {})
@@ -524,6 +566,11 @@ def _widget_classes() -> SimpleNamespace:
                     else []
                 ),
                 f"Traceability: {payload.get('traceability')}",
+                *(
+                    [f"SHA-256: {payload['sha256']}", f"Hash file: {payload.get('sha256_file')}"]
+                    if payload.get("sha256")
+                    else []
+                ),
             ]
             self._set_status("\n".join(lines), append=False)
 

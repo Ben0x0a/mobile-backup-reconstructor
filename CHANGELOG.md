@@ -4,6 +4,55 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-11-04
+
+### Changed
+
+- **Renamed to `mobile-backup-reconstruct`** (package `mobile-backup-reconstructor`)
+  now that Android backups are supported. Every artefact name carries the new
+  tag, e.g. `_traceability/mobile-backup-reconstruct.provenance.traceability.json`;
+  the console script is `mobile-backup-reconstruct`. **Breaking** for anything
+  matching on the old `ios-backup-reconstruct` names.
+- **The Full File System-like layout is always written as a zip, streamed.** As
+  a folder tree its device paths exceed Windows' 260-character limit and broke
+  the output for tools that do not handle long paths; inside a zip a path is only
+  a member name. `--format auto` gives a zip for this layout on every platform,
+  and an explicit `--format folder` is refused with the reason. The iOS `backup`
+  layout can still be written as a folder. The GUI locks the output type to zip
+  for this layout.
+- GUI wording: the rebuild mode is now *Reconstruct structure like a Full File
+  System acquisition*, the layouts *Full File System-like (zip)* and *iOS backup
+  domains*; **Browse** picks a `Manifest.plist` or `.ab` file.
+
+### Added
+
+- **Zip-root artefacts** in every zip output:
+  - `Manifest.db` — the decrypted `Manifest.db` (an exact copy when unencrypted);
+  - `Manifest.mobile-backup-reconstruct.enriched.db` — the same database with a
+    `Files.zipPath` column giving each row's member name in the archive (`NULL`
+    when the row was not written);
+  - `mobile-backup-reconstruct.traceability.txt` — a readable summary: source
+    and device, SHA-256 of every source manifest file and every root artefact,
+    options and statistics.
+- **`<output>.zip.sha256`** beside the archive, in `sha256sum` format (an archive
+  cannot contain its own digest). The CLI/GUI result reports `sha256` and
+  `sha256_file`.
+- Provenance records `platform` and `backup.manifest_db_plaintext_sha256`.
+- **Android `adb backup` (`.ab`) support**, recognised by its header: format
+  versions 1–5, compressed or not, and AES-256 encrypted archives (PBKDF2 key
+  unlock with checksum validation, as AOSP does, including the version-1 8-bit
+  fallback). The payload is decrypted, inflated and untarred as a stream into
+  the same Full File System-like zip; paths are mapped by
+  `config/android_maps/aosp_full_backup.yaml` (overridable with `--domain-map`).
+  A truncated or corrupt payload fails closed. `--mode decrypt`, `--layout
+  backup`, `--format folder` and `--try-default-passwords` are refused for `.ab`
+  input, with the reason.
+
+### Fixed
+
+- The staging directory is removed through the Windows extended-length path, so
+  a staged tree with long paths no longer makes the cleanup itself fail.
+
 ## [0.2.2] — 2026-10-01
 
 ### Fixed

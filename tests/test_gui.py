@@ -108,6 +108,10 @@ class GuiTests(unittest.TestCase):
         window = self.make_window()
         self.assertEqual(window.reconstruct_button.text(), "Reconstruct")
         self.assertTrue(window.output_layout.isEnabled())
+        # The default Full File System-like layout is always a zip, so the type is locked.
+        self.assertFalse(window.output_type.isEnabled())
+        self.assertEqual(window.output_type.currentData(), "zip")
+        window.output_layout.setCurrentIndex(window.output_layout.findData("backup"))
         self.assertTrue(window.output_type.isEnabled())
 
         window.mode_decrypt.setChecked(True)
@@ -125,6 +129,9 @@ class GuiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             window.output_folder.setText(tmp)
             window.output_name.setText("rebuilt")
+            self.assertEqual(window._output_path(), Path(tmp) / "rebuilt.zip", "FFS-like is always a zip")
+            window.output_layout.setCurrentIndex(window.output_layout.findData("backup"))
+            window.output_type.setCurrentIndex(window.output_type.findData("folder"))
             self.assertEqual(window._output_path(), Path(tmp) / "rebuilt")
             window.output_type.setCurrentIndex(window.output_type.findData("zip"))
             self.assertEqual(window._output_path(), Path(tmp) / "rebuilt.zip")
@@ -229,6 +236,7 @@ class GuiTests(unittest.TestCase):
             window.output_folder.setText(str(root))
             window.output_name.setText("rebuilt")
             window.output_layout.setCurrentIndex(window.output_layout.findData("backup"))
+            window.output_type.setCurrentIndex(window.output_type.findData("folder"))
             window.last_backup_info = {"backup": str(backup), "encrypted": False}
 
             window._reconstruct()
@@ -292,6 +300,7 @@ class GuiTests(unittest.TestCase):
             window.output_folder.setText(str(root))
             window.output_name.setText("out")
             window.output_layout.setCurrentIndex(window.output_layout.findData("backup"))
+            window.output_type.setCurrentIndex(window.output_type.findData("folder"))
 
             # Exactly what the operator does: press Reconstruct, nothing else.
             self.assertIsNone(window.last_backup_info, "no inspect has run yet")

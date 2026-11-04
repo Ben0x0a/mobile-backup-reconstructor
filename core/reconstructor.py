@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Reconstruct files from an iOS local backup.
+"""Reconstruct files from an iOS local backup, and dispatch Android backups.
 
 Defines: keybag parsing and decryption, `Manifest.db` traversal, domain-to-path
-mapping, the reconstruction pipeline (folder and zip), traceability output, and
-the CLI argument parser.
-Used by: launcher.cli, gui.interface, tests.
-Depends on: config.settings, config/domain_maps (package data), core.models.
+mapping, the iOS reconstruction pipeline (folder and Full File System-like zip),
+traceability output, and the CLI argument parser. An Android `.ab` input is
+recognised by its header and handed to core.android_reconstructor.
+Used by: launcher.cli, gui.interface, core.decryptor, core.android_reconstructor, tests.
+Depends on: config.settings, config/domain_maps (package data), core.models,
+core.output_paths, core.ffs_archive, core.android_backup (lazily).
 
 The input backup is never modified. For encrypted backups, decrypted content is
 written only to the requested output folder or zip archive.
@@ -24,13 +26,11 @@ import logging
 import os
 import platform
 import plistlib
-import re
 import shutil
 import sqlite3
 import struct
 import sys
 import tempfile
-import zipfile
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack
 from datetime import UTC, datetime
@@ -43,18 +43,38 @@ from config.settings import (
     CHUNK_SIZE,
     DEFAULT_BACKUP_PASSWORDS,
     DEFAULT_OUTPUT_LAYOUT,
+    ENRICHED_MANIFEST_NAME,
+    ENRICHED_ZIP_PATH_COLNAME,
     FAILURE_REPORT_DIR_NAME,
+    FFS_LAYOUT,
     OPTIONAL_BACKUP_FILES,
     OUTPUT_LAYOUTS,
     REQUIRED_BACKUP_FILES,
+    ROOT_MANIFEST_DB_NAME,
+    ROOT_TRACEABILITY_TEXT_NAME,
     TOOL_NAME,
     TOOL_VERSION,
     TRACEABILITY_DIR_NAME,
     TRACEABILITY_FILE_MANIFEST_NAME,
     TRACEABILITY_PROVENANCE_NAME,
-    ZIP_SPOOL_MAX_SIZE,
+)
+from core.ffs_archive import (
+    FfsZipWriter,
+    TraceSection,
+    sidecar_path,
+    write_root_traceability_text,
+    write_zip_sha256_sidecar,
 )
 from core.models import FileRecord, ReconstructionResult
+from core.output_paths import (
+    WINDOWS_MAX_PATH,
+    claim_unique_path,
+    exceeds_windows_max_path,
+    long_path,
+    safe_join_path,
+    safe_output_path,
+    sanitise_segment,  # noqa: F401 - re-exported: part of this module's public surface
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -62,16 +82,6 @@ DIRECTORY_FLAG = 2
 ZERO_IV = b"\x00" * 16
 KEYBAG_CLASSKEY_TAGS = {b"CLAS", b"WRAP", b"WPKY", b"KTYP", b"PBKY"}
 WRAP_PASSCODE = 2
-INVALID_PATH_CHARS = re.compile(r'[<>:"\\|?*\x00-\x1f]')
-RESERVED_WINDOWS_NAMES = {
-    "CON",
-    "PRN",
-    "AUX",
-    "NUL",
-    *(f"COM{i}" for i in range(1, 10)),
-    *(f"LPT{i}" for i in range(1, 10)),
-}
-
 DomainMap = dict[str, Any]
 
 # (files_done, files_total, current_output_path) -> None. Cosmetic only; see
@@ -157,52 +167,6 @@ def read_optional_plist(path: Path) -> dict[str, Any]:
 def missing_optional_files(backup_dir: Path) -> list[str]:
     """Which provenance-only files this backup does not carry."""
     return [name for name in OPTIONAL_BACKUP_FILES if not (backup_dir / name).is_file()]
-
-
-# Windows refuses a path longer than this unless it carries the extended-length
-# prefix. Consumed by: long_path, and the long-path count in the run statistics.
-WINDOWS_MAX_PATH = 260
-# The prefix that lifts that limit to ~32,767 characters.
-WINDOWS_LONG_PATH_PREFIX = "\\\\?\\"
-
-
-def long_path(path: Path) -> Path:
-    r"""Return `path` in a form Windows' `MAX_PATH` limit does not apply to.
-
-    HOW: resolves the path and prepends the `\\?\` extended-length prefix (or
-    `\\?\UNC\` for a network share), which raises the limit from 260 characters
-    to roughly 32,767. A no-op on every other platform, where no such limit exists.
-
-    WHY prefix rather than skip the file: a rebuilt iOS path is long before the
-    operator's own destination is added — `private/var/mobile/Containers/Data/
-    Application/<bundle id>/Library/...` — so on Windows a reconstruction failed
-    with "path too long" partway through. The alternative, refusing to write those
-    files, loses evidence; this writes them.
-
-    The prefix is applied ONLY to paths used for I/O. Traceability records the
-    plain path, because `\\?\C:\...` is an implementation detail and an examiner
-    should not have to read it.
-    """
-    if os.name != "nt":
-        return path
-    resolved = path.resolve()
-    text = str(resolved)
-    if text.startswith(WINDOWS_LONG_PATH_PREFIX):
-        return resolved
-    if text.startswith("\\\\"):
-        # A UNC share: \\server\share -> \\?\UNC\server\share
-        return Path(f"{WINDOWS_LONG_PATH_PREFIX}UNC{text[1:]}")
-    return Path(f"{WINDOWS_LONG_PATH_PREFIX}{text}")
-
-
-def exceeds_windows_max_path(path: Path) -> bool:
-    """Whether this destination would be unreachable to a tool that does not
-    handle Windows long paths.
-
-    Reported so an operator learns the output needs long-path-aware tools, rather
-    than discovering it when something else fails to open the file.
-    """
-    return len(str(path)) > WINDOWS_MAX_PATH
 
 
 def sha256_file(path: Path) -> str:
@@ -462,41 +426,6 @@ def source_path_for_file_id(backup_dir: Path, file_id: str) -> Path:
     if nested.exists():
         return nested
     return backup_dir / file_id
-
-
-def sanitise_segment(segment: str) -> str:
-    # rstrip, NOT strip: a TRAILING dot or space is illegal on Windows, but a
-    # LEADING dot is a legitimate and meaningful part of a Unix filename. Stripping
-    # it renamed the evidence — `.GlobalPreferences.plist` was written out as
-    # `GlobalPreferences.plist`, a different file from the one the backup recorded.
-    cleaned = INVALID_PATH_CHARS.sub("_", segment).rstrip(" .")
-    if not cleaned:
-        cleaned = "_"
-    if cleaned.upper() in RESERVED_WINDOWS_NAMES:
-        cleaned = f"_{cleaned}"
-    return cleaned
-
-
-def safe_output_path(domain: str, relative_path: str) -> PurePosixPath:
-    parts = [sanitise_segment(domain)]
-    for part in PurePosixPath(relative_path).parts:
-        if part in ("", ".", "..") or part.startswith("/"):
-            continue
-        parts.append(sanitise_segment(part))
-    return PurePosixPath(*parts)
-
-
-def safe_join_path(root: str, relative_path: str) -> PurePosixPath:
-    parts: list[str] = []
-    for part in PurePosixPath(root).parts:
-        if part in ("", ".", "..", "/"):
-            continue
-        parts.append(sanitise_segment(part))
-    for part in PurePosixPath(relative_path).parts:
-        if part in ("", ".", "..") or part.startswith("/"):
-            continue
-        parts.append(sanitise_segment(part))
-    return PurePosixPath(*parts)
 
 
 def parse_simple_domain_yaml(path: Path) -> DomainMap:
@@ -794,44 +723,6 @@ def trim_to_limit(data: bytes, written: int, limit: int | None) -> bytes:
     return data[: max(0, limit - written)]
 
 
-def claim_unique_path(
-    rel: PurePosixPath,
-    claimed: dict[str, str],
-    is_directory: bool,
-    base: Path | None = None,
-) -> PurePosixPath:
-    """Reserve an output path for one record, disambiguating real collisions.
-
-    HOW: walks candidate paths, appending ``~1``, ``~2``, ... until one is free,
-    then records which kind of record claimed it. A path is free for a directory
-    record when nothing else claimed it as a FILE and the on-disk entry (if any)
-    is itself a directory; it is free for a file record when nothing claimed it
-    and nothing exists there.
-    WHY: ``Manifest.db`` lists rows in arbitrary order, so a directory row often
-    arrives after the files inside it, by which point the directory already
-    exists because it was created as their parent. Treating mere existence as a
-    collision renamed that legitimate row to ``SMS~1`` and left an empty decoy
-    folder beside the real one. `base` is None for zip output, which has no
-    filesystem to consult.
-    """
-    candidate = rel
-    suffix = 1
-    while True:
-        key = candidate.as_posix().lower()
-        existing = base / Path(*candidate.parts) if base is not None else None
-        if is_directory:
-            free = claimed.get(key, "directory") == "directory" and (
-                existing is None or not existing.exists() or existing.is_dir()
-            )
-        else:
-            free = key not in claimed and (existing is None or not existing.exists())
-        if free:
-            claimed[key] = "directory" if is_directory else "file"
-            return candidate
-        candidate = candidate.parent / f"{candidate.name}~{suffix}"
-        suffix += 1
-
-
 def row_for_record(record: FileRecord, output_ref: str, status: str, error: str = "") -> dict[str, Any]:
     return {
         "file_id": record.file_id,
@@ -854,28 +745,33 @@ def is_directory_record(record: FileRecord) -> bool:
     return bool(record.flags & DIRECTORY_FLAG)
 
 
-def write_csv(rows: list[dict[str, Any]], fh: io.TextIOBase) -> None:
-    fieldnames = [
-        "file_id",
-        "domain",
-        "relative_path",
-        "flags",
-        "source_path",
-        "output_path",
-        "source_sha256",
-        "output_sha256",
-        "source_size",
-        "output_size",
-        "declared_size",
-        "status",
-        "error",
-        # Written only by --mode decrypt: an encrypted backup records Digest as
-        # SHA-1 of the ciphertext, so decrypting forces it to be recomputed over
-        # the plaintext. Both values are kept so the rewrite is auditable.
-        "manifest_digest_original",
-        "manifest_digest_rewritten",
-    ]
-    writer = csv.DictWriter(fh, fieldnames=fieldnames)
+# Columns of the iOS file manifest. Consumed by: write_csv (default), core.decryptor.
+IOS_MANIFEST_FIELDNAMES = (
+    "file_id",
+    "domain",
+    "relative_path",
+    "flags",
+    "source_path",
+    "output_path",
+    "source_sha256",
+    "output_sha256",
+    "source_size",
+    "output_size",
+    "declared_size",
+    "status",
+    "error",
+    # Written only by --mode decrypt: an encrypted backup records Digest as
+    # SHA-1 of the ciphertext, so decrypting forces it to be recomputed over
+    # the plaintext. Both values are kept so the rewrite is auditable.
+    "manifest_digest_original",
+    "manifest_digest_rewritten",
+)
+
+
+def write_csv(
+    rows: list[dict[str, Any]], fh: io.TextIOBase, fieldnames: Iterable[str] = IOS_MANIFEST_FIELDNAMES
+) -> None:
+    writer = csv.DictWriter(fh, fieldnames=list(fieldnames))
     writer.writeheader()
     writer.writerows(rows)
 
@@ -890,18 +786,34 @@ def write_trace_folder(output_dir: Path, provenance: dict[str, Any], rows: list[
         write_csv(rows, fh)
 
 
-def write_trace_zip(zf: zipfile.ZipFile, provenance: dict[str, Any], rows: list[dict[str, Any]]) -> None:
-    zf.writestr(
-        f"{TRACEABILITY_DIR_NAME}/{TRACEABILITY_PROVENANCE_NAME}", json.dumps(provenance, indent=2, sort_keys=True)
-    )
+def write_trace_zip(
+    writer: FfsZipWriter,
+    provenance: dict[str, Any],
+    rows: list[dict[str, Any]],
+    fieldnames: Iterable[str] = IOS_MANIFEST_FIELDNAMES,
+) -> dict[str, str]:
+    """Write the `_traceability/` pair into the archive; return member -> SHA-256."""
     csv_buffer = io.StringIO()
-    write_csv(rows, csv_buffer)
-    zf.writestr(f"{TRACEABILITY_DIR_NAME}/{TRACEABILITY_FILE_MANIFEST_NAME}", csv_buffer.getvalue())
+    write_csv(rows, csv_buffer, fieldnames)
+    members = {
+        f"{TRACEABILITY_DIR_NAME}/{TRACEABILITY_PROVENANCE_NAME}": json.dumps(provenance, indent=2, sort_keys=True),
+        f"{TRACEABILITY_DIR_NAME}/{TRACEABILITY_FILE_MANIFEST_NAME}": csv_buffer.getvalue(),
+    }
+    return {name: writer.add_root_bytes(name, text.encode("utf-8")) for name, text in members.items()}
 
 
 def dry_run_records(
-    backup_dir: Path, db_path: Path, output_layout: str, domain_map: DomainMap | None = None
+    backup_dir: Path,
+    db_path: Path,
+    output_layout: str,
+    domain_map: DomainMap | None = None,
+    claimed: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Plan every row without writing content.
+
+    `claimed` is the archive writer's claim table for zip output, so planned
+    names match what a real run would write (root artefact names are reserved).
+    """
     rows: list[dict[str, Any]] = []
     stats = {
         "records": 0,
@@ -914,7 +826,7 @@ def dry_run_records(
         # extended-length path, but unreachable to a tool that does not handle them.
         "long_paths": 0,
     }
-    claimed: dict[str, str] = {}
+    claimed = {} if claimed is None else claimed
     for record in iter_file_records(backup_dir, db_path, output_layout, domain_map):
         stats["records"] += 1
         rel = claim_unique_path(record.output_path, claimed, is_directory_record(record))
@@ -930,7 +842,12 @@ def dry_run_records(
     return rows, stats
 
 
-def write_failure_report(output: Path, provenance: dict[str, Any], rows: list[dict[str, Any]]) -> Path:
+def write_failure_report(
+    output: Path,
+    provenance: dict[str, Any],
+    rows: list[dict[str, Any]],
+    fieldnames: Iterable[str] = IOS_MANIFEST_FIELDNAMES,
+) -> Path:
     report_root = output.parent / FAILURE_REPORT_DIR_NAME
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     report_dir = long_path(report_root / f"{output.stem}-{timestamp}")
@@ -939,7 +856,7 @@ def write_failure_report(output: Path, provenance: dict[str, Any], rows: list[di
         json.dumps(provenance, indent=2, sort_keys=True), encoding="utf-8"
     )
     with (report_dir / TRACEABILITY_FILE_MANIFEST_NAME).open("w", newline="", encoding="utf-8") as fh:
-        write_csv(rows, fh)
+        write_csv(rows, fh, fieldnames)
     return report_dir
 
 
@@ -963,6 +880,7 @@ def build_provenance(
     dry_run: bool,
     continue_on_error: bool,
     try_default_passwords: bool,
+    manifest_db_plaintext_sha256: str | None = None,
 ) -> dict[str, Any]:
     # `stats["cancelled"]` is surfaced at the top of the output block as well as
     # inside stats: a reader must not have to notice a counter to learn that the
@@ -970,6 +888,7 @@ def build_provenance(
     return {
         "tool": TOOL_NAME,
         "tool_version": TOOL_VERSION,
+        "platform": "ios",
         "created_utc": datetime.now(UTC).isoformat(),
         "host": {
             "system": platform.system(),
@@ -981,6 +900,10 @@ def build_provenance(
             "path": str(backup_dir),
             "manifest_plist_sha256": sha256_file(backup_dir / "Manifest.plist"),
             "manifest_db_sha256": sha256_file(backup_dir / "Manifest.db"),
+            # The Manifest.db actually walked: the decrypted copy for an encrypted
+            # backup, the same file (same digest) otherwise. It is the one written
+            # to the archive root, so this digest verifies that copy.
+            "manifest_db_plaintext_sha256": manifest_db_plaintext_sha256,
             # None when the backup does not carry the file at all. `absent_files`
             # below says which, so a null is never ambiguous between "missing from
             # the backup" and "the tool failed to read it".
@@ -1101,7 +1024,7 @@ def prepare_manifest_db(
         try:
             keybag = try_unlock_keybag(keybag_blob, candidate)
             decrypted_db = decrypt_manifest_db(backup_dir, manifest, keybag)
-            tmp = tempfile.TemporaryDirectory(prefix="ios_backup_manifest_")
+            tmp = tempfile.TemporaryDirectory(prefix="mobile_backup_manifest_")
             tmp_db = Path(tmp.name) / "Manifest.db"
             tmp_db.write_bytes(decrypted_db)
             if tried_defaults and candidate in DEFAULT_BACKUP_PASSWORDS:
@@ -1212,7 +1135,7 @@ def reconstruct_to_folder(
 def reconstruct_to_zip(
     backup_dir: Path,
     db_path: Path,
-    zip_path: Path,
+    writer: FfsZipWriter,
     encrypted: bool,
     keybag: Keybag | None,
     output_layout: str = "backup",
@@ -1220,8 +1143,12 @@ def reconstruct_to_zip(
     progress: ProgressCallback | None = None,
     cancel: CancelEvent | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    zip_path = long_path(zip_path)
-    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    """Stream every manifest row into the open archive `writer`.
+
+    No device path ever touches the disk as a path: content goes through a
+    spool into a member name, which is what keeps the Windows path limit out
+    of the picture (see core.ffs_archive).
+    """
     rows: list[dict[str, Any]] = []
     stats = {
         "records": 0,
@@ -1230,67 +1157,182 @@ def reconstruct_to_zip(
         "failed": 0,
         "directories": 0,
         "cancelled": 0,
-        # Destinations over Windows' 260-character limit. Written correctly via the
-        # extended-length path, but unreachable to a tool that does not handle them.
+        # Always 0 for a zip: member names carry no path limit. Kept so every
+        # run reports the same statistics keys.
         "long_paths": 0,
     }
-    claimed: dict[str, str] = {}
     total = count_manifest_rows(db_path)
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
-        for record in iter_file_records(backup_dir, db_path, output_layout, domain_map):
-            if is_cancelled(cancel):
-                stats["cancelled"] = 1
-                break
-            stats["records"] += 1
-            arcname = claim_unique_path(record.output_path, claimed, is_directory_record(record)).as_posix()
-            if is_directory_record(record):
-                dir_name = arcname if arcname.endswith("/") else f"{arcname}/"
-                zf.writestr(dir_name, b"")
-                rows.append(row_for_record(record, dir_name, "directory_record"))
-                stats["directories"] += 1
-                continue
-            if not record.source_path.is_file():
-                rows.append(row_for_record(record, arcname, "missing_source"))
-                stats["missing"] += 1
-                continue
-            row = row_for_record(record, arcname, "pending")
-            try:
-                info = zipfile.ZipInfo(arcname)
-                mtime = metadata_mtime(record.metadata)
-                if mtime:
-                    if mtime.tzinfo is not None:
-                        mtime = mtime.astimezone(UTC).replace(tzinfo=None)
-                    info.date_time = max(mtime.timetuple()[:6], (1980, 1, 1, 0, 0, 0))
-                info.compress_type = zipfile.ZIP_DEFLATED
-                key = file_key_for_record(record, keybag) if encrypted and keybag else None
-                if encrypted and key is None:
-                    raise BackupError("Encrypted backup record has no usable file encryption key")
-                spool = tempfile.SpooledTemporaryFile(max_size=ZIP_SPOOL_MAX_SIZE)
-                with spool:
-                    if key is None:
-                        output_size, source_hash, output_hash = copy_plain(record.source_path, spool)
-                    else:
-                        output_size, source_hash, output_hash = decrypt_copy(
-                            record.source_path, spool, key, metadata_size(record.metadata)
-                        )
-                    spool.seek(0)
-                    with zf.open(info, "w") as out_fh:
-                        shutil.copyfileobj(spool, out_fh)
-                row.update(
-                    {
-                        "status": "written",
-                        "source_sha256": source_hash,
-                        "output_sha256": output_hash,
-                        "output_size": output_size,
-                    }
-                )
-                stats["written"] += 1
-            except Exception as exc:
-                row.update({"status": "failed", "error": str(exc)})
-                stats["failed"] += 1
-            rows.append(row)
-            report_progress(progress, stats["records"], total, record.relative_path)
+    for record in iter_file_records(backup_dir, db_path, output_layout, domain_map):
+        if is_cancelled(cancel):
+            stats["cancelled"] = 1
+            break
+        stats["records"] += 1
+        arcname = writer.claim(record.output_path, is_directory_record(record))
+        if is_directory_record(record):
+            dir_name = writer.add_directory(arcname)
+            rows.append(row_for_record(record, dir_name, "directory_record"))
+            stats["directories"] += 1
+            continue
+        if not record.source_path.is_file():
+            rows.append(row_for_record(record, arcname, "missing_source"))
+            stats["missing"] += 1
+            continue
+        row = row_for_record(record, arcname, "pending")
+        try:
+            key = file_key_for_record(record, keybag) if encrypted and keybag else None
+            if encrypted and key is None:
+                raise BackupError("Encrypted backup record has no usable file encryption key")
+
+            def produce(spool: BinaryIO, key: bytes | None = key, record: FileRecord = record) -> tuple[int, str, str]:
+                if key is None:
+                    return copy_plain(record.source_path, spool)
+                return decrypt_copy(record.source_path, spool, key, metadata_size(record.metadata))
+
+            output_size, source_hash, output_hash = writer.add_member(arcname, metadata_mtime(record.metadata), produce)
+            row.update(
+                {
+                    "status": "written",
+                    "source_sha256": source_hash,
+                    "output_sha256": output_hash,
+                    "output_size": output_size,
+                }
+            )
+            stats["written"] += 1
+        except Exception as exc:
+            row.update({"status": "failed", "error": str(exc)})
+            stats["failed"] += 1
+        rows.append(row)
+        report_progress(progress, stats["records"], total, record.relative_path)
     return rows, stats
+
+
+# Row statuses whose `output_path` names a member actually in the archive (or,
+# for a dry run, the member a real run would write). Consumed by: build_enriched_manifest.
+ARCHIVED_STATUSES = frozenset({"written", "directory_record", "planned"})
+
+
+def build_enriched_manifest(db_path: Path, rows: list[dict[str, Any]], destination: Path) -> Path:
+    """Copy `Manifest.db` to `destination`, adding each row's archive member name.
+
+    HOW: copies the database file, adds one TEXT column
+    (`ENRICHED_ZIP_PATH_COLNAME`) to `Files`, and sets it by `fileID` for every
+    row present in the archive. Rows that were not written (missing blob,
+    failure, cancelled before reaching them) keep NULL, so a NULL is never
+    mistaken for a path.
+    WHY a copy with one added column rather than a separate table or CSV: any
+    tool or query written for Manifest.db keeps working unchanged, and the
+    member name sits on the same row as the domain and relativePath it was
+    derived from. The original Manifest.db is written beside it, untouched.
+    """
+    shutil.copyfile(db_path, destination)
+    conn = sqlite3.connect(destination)
+    try:
+        conn.execute(f'ALTER TABLE Files ADD COLUMN "{ENRICHED_ZIP_PATH_COLNAME}" TEXT')
+        conn.executemany(
+            f'UPDATE Files SET "{ENRICHED_ZIP_PATH_COLNAME}" = ? WHERE fileID = ?',
+            ((row["output_path"], row["file_id"]) for row in rows if row["status"] in ARCHIVED_STATUSES),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return destination
+
+
+def ios_traceability_sections(provenance: dict[str, Any], digests: dict[str, str], zip_name: str) -> list[TraceSection]:
+    """The root summary for an iOS archive, from the provenance and root digests."""
+    backup = provenance["backup"]
+    device = backup["device"]
+    output = provenance["output"]
+    encrypted = backup["encrypted"]
+    return [
+        (
+            "Run",
+            [
+                ("Tool", f"{provenance['tool']} {provenance['tool_version']}"),
+                ("Created (UTC)", provenance["created_utc"]),
+                ("Host", f"{provenance['host']['system']} {provenance['host']['release']}"),
+                ("Python", provenance["host"]["python"]),
+                ("Command", " ".join(provenance["command"])),
+            ],
+        ),
+        (
+            "Source",
+            [
+                ("Platform", "iOS backup (iTunes / Finder)"),
+                ("Path", backup["path"]),
+                ("Encrypted", "yes" if encrypted else "no"),
+                ("Backup date", backup["manifest_date"]),
+                ("Device name", device["name"]),
+                ("Product", f"{device['product_name'] or ''} {device['product_type'] or ''}".strip()),
+                ("iOS version", device["product_version"]),
+                ("Serial number", device["serial_number"]),
+                ("Unique identifier", device["unique_identifier"]),
+                ("Absent optional files", ", ".join(backup["absent_files"])),
+            ],
+        ),
+        (
+            "Source digests (SHA-256, as read)",
+            [
+                ("Manifest.plist", backup["manifest_plist_sha256"]),
+                ("Manifest.db" + (" (encrypted)" if encrypted else ""), backup["manifest_db_sha256"]),
+                ("Info.plist", backup["info_plist_sha256"]),
+                ("Status.plist", backup["status_plist_sha256"]),
+            ],
+        ),
+        (
+            "Archive root artefacts (SHA-256)",
+            [
+                (
+                    ROOT_MANIFEST_DB_NAME + (" (decrypted)" if encrypted else " (copy of the source)"),
+                    digests.get(ROOT_MANIFEST_DB_NAME),
+                ),
+                (ENRICHED_MANIFEST_NAME, digests.get(ENRICHED_MANIFEST_NAME)),
+                *((name, digest) for name, digest in digests.items() if name.startswith(TRACEABILITY_DIR_NAME)),
+            ],
+        ),
+        (
+            "Output",
+            [
+                ("Archive", zip_name),
+                ("Layout", output["layout"]),
+                ("Domain map", output["domain_map_name"]),
+                ("Dry run", output["dry_run"]),
+                ("Continue on error", output["continue_on_error"]),
+                ("Cancelled (incomplete)", output["cancelled"]),
+            ],
+        ),
+        ("Statistics", list(provenance["stats"].items())),
+        (
+            "Verification",
+            [
+                ("Archive SHA-256", f"in {sidecar_path(Path(zip_name)).name}, beside the archive"),
+                (
+                    "Per-file digests",
+                    f"{TRACEABILITY_DIR_NAME}/{TRACEABILITY_FILE_MANIFEST_NAME} (source and output SHA-256)",
+                ),
+                (f"{ENRICHED_MANIFEST_NAME}", f"Manifest.db + Files.{ENRICHED_ZIP_PATH_COLNAME} (member name per row)"),
+            ],
+        ),
+    ]
+
+
+def write_ios_root_artefacts(
+    writer: FfsZipWriter,
+    db_path: Path,
+    provenance: dict[str, Any],
+    rows: list[dict[str, Any]],
+    zip_name: str,
+) -> None:
+    """Write `_traceability/`, Manifest.db, the enriched manifest and the summary.
+
+    The summary is written last because it lists the digests of the others.
+    """
+    digests = {ROOT_MANIFEST_DB_NAME: writer.add_root_file(ROOT_MANIFEST_DB_NAME, db_path)}
+    with tempfile.TemporaryDirectory(prefix="mobile_backup_enriched_") as tmp:
+        enriched = build_enriched_manifest(db_path, rows, Path(tmp) / ENRICHED_MANIFEST_NAME)
+        digests[ENRICHED_MANIFEST_NAME] = writer.add_root_file(ENRICHED_MANIFEST_NAME, enriched)
+    digests.update(write_trace_zip(writer, provenance, rows))
+    write_root_traceability_text(writer, ios_traceability_sections(provenance, digests, zip_name))
 
 
 def validate_output_target(path: Path, backup_dir: Path, force: bool, output_format: str) -> None:
@@ -1335,16 +1377,22 @@ def output_has_tool_collision(
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Reconstruct iOS backup files from Manifest.db, optionally decrypting encrypted backups."
+        description=(
+            "Reconstruct an iOS backup (Manifest.db) or an Android adb backup (.ab) into a "
+            "structure like a Full File System acquisition, decrypting encrypted backups."
+        )
     )
     parser.add_argument("--version", action="version", version=f"{TOOL_NAME} {TOOL_VERSION}")
-    parser.add_argument("backup", type=Path, help="Path to an iOS backup directory or its Manifest.plist")
+    parser.add_argument("backup", type=Path, help="An iOS backup directory, its Manifest.plist, or an Android .ab file")
     parser.add_argument("output", type=Path, help="Output folder or zip path")
     parser.add_argument(
         "--format",
         choices=("auto", "folder", "zip"),
         default="auto",
-        help="Output format. auto uses zip on Windows and folder elsewhere.",
+        help=(
+            "Output format. The filesystem layout is always a zip; for the backup layout, "
+            "auto uses zip on Windows and folder elsewhere."
+        ),
     )
     parser.add_argument(
         "--mode",
@@ -1360,13 +1408,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--layout",
         choices=OUTPUT_LAYOUTS,
         default=DEFAULT_OUTPUT_LAYOUT,
-        help="Output layout: backup keeps backup domains; filesystem maps domains to filesystem-like paths.",
+        help=(
+            "Output layout: filesystem rebuilds a structure like a Full File System acquisition "
+            "(always a zip); backup keeps iOS backup domains."
+        ),
     )
     parser.add_argument(
         "--domain-map",
         type=Path,
         default=None,
-        help="YAML file or directory of domain-to-filesystem mount mappings. Defaults to the shipped maps.",
+        help=(
+            "YAML file or directory of domain-to-filesystem mappings (iOS), or an Android "
+            "path-map YAML file (.ab). Defaults to the shipped maps."
+        ),
     )
     parser.add_argument("--force", action="store_true", help="Allow appending to an output folder or replacing a zip.")
     parser.add_argument(
@@ -1395,11 +1449,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def inspect_backup(backup: Path) -> dict[str, Any]:
+    from core.android_backup import inspect_android_backup, is_android_backup
+
+    if is_android_backup(backup.expanduser()):
+        return inspect_android_backup(backup.expanduser())
     backup_dir = resolve_backup_dir(backup)
     manifest = read_plist(backup_dir / "Manifest.plist")
     info = read_optional_plist(backup_dir / "Info.plist")
     return {
         "backup": str(backup_dir),
+        "platform": "ios",
         "encrypted": bool(manifest.get("IsEncrypted", False)),
         "absent_files": missing_optional_files(backup_dir),
         "device": first_present(info, ("Device Name", "Display Name")),
@@ -1421,9 +1480,24 @@ def backup_product_version(info: dict[str, Any], manifest: dict[str, Any]) -> st
     return None
 
 
-def normalise_output_format(output_format: str) -> str:
+def normalise_output_format(output_format: str, output_layout: str = "backup") -> str:
+    """Resolve `auto` and enforce that the Full File System-like layout is a zip.
+
+    WHY the FFS layout refuses a folder rather than quietly switching: its device
+    paths exceed Windows' 260-character limit as a folder tree, which broke the
+    output for tools that do not handle long paths. An operator who explicitly
+    asked for a folder must learn why they get a zip, not find one unannounced.
+    """
     if output_format not in ("auto", "folder", "zip"):
         raise BackupError(f"Unsupported output format: {output_format}")
+    if output_layout == FFS_LAYOUT:
+        if output_format == "folder":
+            raise BackupError(
+                "The Full File System-like layout is always written as a zip: its device paths "
+                "exceed Windows' path-length limit as a folder tree. Use --format zip (or auto), "
+                "or --layout backup for a folder."
+            )
+        return "zip"
     if output_format == "auto":
         return "zip" if platform.system() == "Windows" else "folder"
     return output_format
@@ -1455,6 +1529,27 @@ def promote_zip_output(staged_output: Path, final_output: Path, force: bool) -> 
     shutil.move(str(long_path(staged_output)), str(long_path(final_output)))
 
 
+def make_staging_dir(output_parent: Path) -> Path:
+    """A private staging directory beside the destination, so promotion is a rename."""
+    return Path(tempfile.mkdtemp(prefix="mobile_backup_output_", dir=output_parent))
+
+
+def remove_staging_dir(stage_root: Path) -> None:
+    """Delete the staging directory through the extended-length path.
+
+    WHY not `TemporaryDirectory.cleanup()`: it removes the tree through the
+    plain path, so on Windows a staged tree holding paths over 260 characters
+    (a folder run appended with --force, or one that failed) could not be
+    deleted and the cleanup itself raised over an otherwise finished run.
+    """
+    try:
+        shutil.rmtree(long_path(stage_root))
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        _LOG.warning(f"Could not remove the staging directory {stage_root}: {exc}")
+
+
 def reconstruct_backup(
     backup: Path,
     output: Path,
@@ -1471,15 +1566,43 @@ def reconstruct_backup(
     progress: ProgressCallback | None = None,
     cancel: CancelEvent | None = None,
 ) -> ReconstructionResult:
+    """Reconstruct an iOS backup directory or an Android `.ab` file.
+
+    The platform is decided from the input's content (the `.ab` header), not
+    its name; an Android backup is handed over to core.android_reconstructor
+    with the same arguments.
+    """
+    from core.android_backup import is_android_backup
+
+    if is_android_backup(backup.expanduser()):
+        from core.android_reconstructor import reconstruct_android_backup
+
+        return reconstruct_android_backup(
+            backup.expanduser(),
+            output,
+            output_format,
+            password,
+            force,
+            command,
+            allow_password_prompt,
+            output_layout,
+            domain_map_path,
+            dry_run,
+            continue_on_error,
+            try_default_passwords,
+            progress=progress,
+            cancel=cancel,
+        )
+
     backup_dir = resolve_backup_dir(backup)
     manifest = read_plist(backup_dir / "Manifest.plist")
     info = read_optional_plist(backup_dir / "Info.plist")
     status = read_optional_plist(backup_dir / "Status.plist")
     encrypted = bool(manifest.get("IsEncrypted", False))
-    output_format = normalise_output_format(output_format)
     output_layout = normalise_output_layout(output_layout)
+    output_format = normalise_output_format(output_format, output_layout)
     product_version = backup_product_version(info, manifest)
-    domain_map = load_domain_mounts(domain_map_path, product_version) if output_layout == "filesystem" else None
+    domain_map = load_domain_mounts(domain_map_path, product_version) if output_layout == FFS_LAYOUT else None
 
     output = output.expanduser()
     if output_format == "zip" and output.suffix.lower() != ".zip":
@@ -1490,8 +1613,34 @@ def reconstruct_backup(
         backup_dir, encrypted, manifest, password, allow_password_prompt, try_default_passwords
     )
     command = command or [TOOL_NAME]
-    output_parent = output.parent.expanduser().resolve()
-    staging_dir = tempfile.TemporaryDirectory(prefix="ios_backup_output_", dir=output_parent)
+    stage_root = make_staging_dir(output.parent.expanduser().resolve())
+    archive_sha256: str | None = None
+
+    def provenance_for(stats: dict[str, int]) -> dict[str, Any]:
+        return build_provenance(
+            backup_dir,
+            output,
+            output_format,
+            manifest,
+            info,
+            status,
+            encrypted,
+            stats,
+            command,
+            output_layout,
+            domain_map,
+            dry_run,
+            continue_on_error,
+            try_default_passwords,
+            manifest_db_plaintext_sha256=sha256_file(db_path),
+        )
+
+    def fail_closed(provenance: dict[str, Any], rows: list[dict[str, Any]]) -> None:
+        report_path = write_failure_report(output, provenance, rows)
+        raise ReconstructionFailedError(
+            f"Reconstruction failed; no output was produced. Failure report: {report_path}", report_path
+        )
+
     try:
         if (
             output_format == "folder"
@@ -1501,11 +1650,10 @@ def reconstruct_backup(
             raise BackupError(
                 f"Output folder already contains reconstructed backup data: {output}. Use --force to append."
             )
-        stage_root = Path(staging_dir.name)
+        staged_output = stage_root / output.name
         if output_format == "folder":
-            staged_output = stage_root / output.name
             if dry_run:
-                staged_output.mkdir(parents=True, exist_ok=True)
+                long_path(staged_output).mkdir(parents=True, exist_ok=True)
                 rows, stats = dry_run_records(backup_dir, db_path, output_layout, domain_map)
             else:
                 rows, stats = reconstruct_to_folder(
@@ -1520,73 +1668,36 @@ def reconstruct_backup(
                     progress=progress,
                     cancel=cancel,
                 )
-            provenance = build_provenance(
-                backup_dir,
-                output,
-                output_format,
-                manifest,
-                info,
-                status,
-                encrypted,
-                stats,
-                command,
-                output_layout,
-                domain_map,
-                dry_run,
-                continue_on_error,
-                try_default_passwords,
-            )
+            provenance = provenance_for(stats)
             if stats["failed"] and not continue_on_error and not stats["cancelled"]:
-                report_path = write_failure_report(output, provenance, rows)
-                raise ReconstructionFailedError(
-                    f"Reconstruction failed; no output was produced. Failure report: {report_path}", report_path
-                )
+                fail_closed(provenance, rows)
             write_trace_folder(staged_output, provenance, rows)
             promote_folder_output(staged_output, output)
         else:
-            staged_output = stage_root / output.name
-            if dry_run:
-                rows, stats = dry_run_records(backup_dir, db_path, output_layout, domain_map)
-                with zipfile.ZipFile(staged_output, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True):
-                    pass
-            else:
-                rows, stats = reconstruct_to_zip(
-                    backup_dir,
-                    db_path,
-                    staged_output,
-                    encrypted,
-                    keybag,
-                    output_layout,
-                    domain_map,
-                    progress=progress,
-                    cancel=cancel,
-                )
-            provenance = build_provenance(
-                backup_dir,
-                output,
-                output_format,
-                manifest,
-                info,
-                status,
-                encrypted,
-                stats,
-                command,
-                output_layout,
-                domain_map,
-                dry_run,
-                continue_on_error,
-                try_default_passwords,
-            )
-            if stats["failed"] and not continue_on_error and not stats["cancelled"]:
-                report_path = write_failure_report(output, provenance, rows)
-                raise ReconstructionFailedError(
-                    f"Reconstruction failed; no output was produced. Failure report: {report_path}", report_path
-                )
-            with zipfile.ZipFile(staged_output, "a", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
-                write_trace_zip(zf, provenance, rows)
+            reserved = (ROOT_MANIFEST_DB_NAME, ENRICHED_MANIFEST_NAME, ROOT_TRACEABILITY_TEXT_NAME)
+            with FfsZipWriter(staged_output, reserved) as writer:
+                if dry_run:
+                    rows, stats = dry_run_records(backup_dir, db_path, output_layout, domain_map, writer.claimed)
+                else:
+                    rows, stats = reconstruct_to_zip(
+                        backup_dir,
+                        db_path,
+                        writer,
+                        encrypted,
+                        keybag,
+                        output_layout,
+                        domain_map,
+                        progress=progress,
+                        cancel=cancel,
+                    )
+                provenance = provenance_for(stats)
+                if stats["failed"] and not continue_on_error and not stats["cancelled"]:
+                    fail_closed(provenance, rows)
+                write_ios_root_artefacts(writer, db_path, provenance, rows, output.name)
             promote_zip_output(staged_output, output, force)
+            archive_sha256, _ = write_zip_sha256_sidecar(output)
     finally:
-        staging_dir.cleanup()
+        remove_staging_dir(stage_root)
         if tmp_dir:
             tmp_dir.cleanup()
     return ReconstructionResult(
@@ -1597,6 +1708,7 @@ def reconstruct_backup(
         stats=stats,
         dry_run=dry_run,
         cancelled=bool(stats["cancelled"]),
+        archive_sha256=archive_sha256,
     )
 
 
@@ -1612,7 +1724,9 @@ def tty_progress_reporter() -> ProgressCallback | None:
 
     def report(done: int, total: int, path: str) -> None:
         shown = path if len(path) <= 60 else f"...{path[-57:]}"
-        print(f"\r  {done}/{total}  {shown:<60}", end="", file=sys.stderr, flush=True)
+        # total is 0 when it cannot be known up front (an .ab is a tar stream).
+        counter = f"{done}/{total}" if total > 0 else f"{done}"
+        print(f"\r  {counter}  {shown:<60}", end="", file=sys.stderr, flush=True)
 
     return report
 
@@ -1627,6 +1741,13 @@ def reject_conflicting_mode_flags(args: argparse.Namespace, raw_args: list[str])
     """
     if args.mode != "decrypt":
         return
+    from core.android_backup import is_android_backup
+
+    if is_android_backup(args.backup.expanduser()):
+        raise BackupError(
+            "--mode decrypt applies to iOS backups only. An encrypted Android backup is "
+            "decrypted as part of the reconstruction: use the default --mode rebuild."
+        )
     passed = {arg.split("=", 1)[0] for arg in raw_args}
     for flag, reason in (
         ("--layout", "the output keeps the backup's own hash-addressed layout"),

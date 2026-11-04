@@ -1,7 +1,7 @@
 [project]
-name = "ios-backup-reconstructor"
+name = "mobile-backup-reconstructor"
 dynamic = ["version"]
-description = "Reconstruct and decrypt files from an iOS local backup, with forensic traceability output."
+description = "Reconstruct iOS and Android backups into a Full File System-like zip, decrypting when needed, with forensic traceability output."
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.12"
@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.scripts]
-ios-backup-reconstruct = "launcher.cli:main"
+mobile-backup-reconstruct = "launcher.cli:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -113,7 +113,7 @@ wheels = [
 ]
 
 [[package]]
-name = "ios-backup-reconstructor"
+name = "mobile-backup-reconstructor"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },

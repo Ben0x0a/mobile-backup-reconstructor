@@ -1,4 +1,4 @@
-"""Test package for the iOS backup reconstructor.
+"""Test package for the mobile backup reconstructor.
 
 Defines: the test package marker, so tests import as `tests.*` and share the
 project root on `sys.path`.

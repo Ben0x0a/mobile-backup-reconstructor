@@ -71,33 +71,42 @@ uv run python main.py /path/to/ios-backup /path/to/output --dry-run
 uv run python main.py /path/to/ios-backup /path/to/output
 ```
 
-### Long paths on Windows
-
-A rebuilt iOS path is long before your destination is added, so many exceed
-Windows' 260-character limit. The tool writes them anyway, using the
-extended-length path form — nothing is skipped. The run reports how many were
-affected (`stats.long_paths`), because a tool that does not handle long paths will
-not be able to open those files afterwards.
-
-A zip archive avoids the question entirely, since the limit applies when files are
-extracted rather than when the archive is written:
+An Android `adb backup` file is reconstructed the same way — the input is
+recognised by its header:
 
 ```bash
-uv run python main.py /path/to/ios-backup /path/to/output.zip --format zip
+uv run python main.py /path/to/backup.ab /path/to/output
 ```
+
+### Why the FFS-like output is a zip
+
+A rebuilt device path is long before your destination is added
+(`private/var/mobile/Containers/Data/Application/<uuid>/Library/...`,
+`data/data/<package>/databases/...`), so written as a folder tree many exceed
+Windows' 260-character limit and break tools that do not handle long paths.
+Inside a zip a path is only a member name, so the Full File System-like layout is
+always written as a zip — the same shape a Full File System acquisition is
+delivered in. `--format folder` is refused for it; the iOS `backup` layout can
+still be written as a folder.
 
 ## Read the output
 
 ```text
-output/
-├── _traceability/
-│   ├── ios-backup-reconstruct.provenance.traceability.json
-│   └── ios-backup-reconstruct.file-manifest.traceability.csv
-└── private/var/mobile/Library/SMS/sms.db
+output.zip
+├── private/var/mobile/Library/SMS/sms.db
+├── Manifest.db                                   # decrypted Manifest.db (iOS)
+├── Manifest.mobile-backup-reconstruct.enriched.db # + Files.zipPath (iOS)
+├── mobile-backup-reconstruct.traceability.txt     # summary with every hash
+└── _traceability/
+    ├── mobile-backup-reconstruct.provenance.traceability.json
+    └── mobile-backup-reconstruct.file-manifest.traceability.csv
+output.zip.sha256                                  # the archive's own SHA-256
 ```
 
-The provenance JSON records the run; the file manifest records one row per
-`Manifest.db` record. See [formats/traceability.md](formats/traceability.md).
+Open the `.traceability.txt` first: it says what the archive is, where it came
+from, and which hashes prove it. The provenance JSON records the run for tools;
+the file manifest records one row per file. See
+[formats/traceability.md](formats/traceability.md).
 
 ## Exit codes
 

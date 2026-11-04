@@ -1,4 +1,4 @@
-"""Command-line launcher for the iOS backup reconstructor.
+"""Command-line launcher for the mobile backup reconstructor.
 
 Defines: the CLI entry point, delegating straight to the reconstruction engine.
 Used by: main.

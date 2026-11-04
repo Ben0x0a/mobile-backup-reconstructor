@@ -81,15 +81,21 @@ already created as the parent of an earlier file record.
 | `launcher/cli.py` | CLI entry point |
 | `launcher/gui.py` | GUI entry point, PySide6-absent handling |
 | `gui/interface.py` | Widgets and background workers; no reconstruction logic |
-| `core/reconstructor.py` | Keybag, manifest parsing, mapping, pipeline, traceability, CLI parser |
+| `core/reconstructor.py` | iOS: keybag, manifest parsing, mapping, pipeline, traceability, CLI parser; dispatches `.ab` input |
+| `core/android_backup.py` | Android `.ab` format: header, password unlock, streamed decrypt/inflate/tar |
+| `core/android_reconstructor.py` | Android path mapping, pipeline, provenance and summary |
+| `core/ffs_archive.py` | The Full File System-like zip: member writes, root artefacts, hash sidecar |
+| `core/output_paths.py` | Path sanitising, collision-free claiming, Windows long paths |
 | `core/models.py` | `FileRecord`, `ReconstructionResult` |
 | `config/settings.py` | Operator-tuneable constants |
-| `config/domain_maps/` | Shipped domain mappings, loaded via `importlib.resources` |
+| `config/domain_maps/` | Shipped iOS domain mappings, loaded via `importlib.resources` |
+| `config/android_maps/` | Shipped Android path map |
 
 ## Testing
 
-`tests/test_ios_backup_reconstruct.py` builds synthetic backups in temporary
-directories — no real evidence data is committed to the repository. The suite
+`tests/test_ios_backup_reconstruct.py` and `tests/test_android_backup.py` build
+synthetic backups in temporary directories (the Android tests write `.ab` files
+with an independent implementation of the AOSP writer) — no real evidence data is committed to the repository. The suite
 covers both output formats, both layouts, domain-map selection, failure and
 `--continue-on-error` behaviour, dry runs, password redaction, and regression
 tests for traceability paths, size handling and directory-record collisions.

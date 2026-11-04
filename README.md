@@ -1,13 +1,19 @@
-# iOS Backup Reconstructor
+# Mobile Backup Reconstructor
 
-Reconstructs files from an iOS local backup using `Manifest.plist` and
-`Manifest.db`, rebuilding the original filenames and directory structure that
-iTunes/Finder flattens into hashed blobs. Encrypted backups are decrypted when
-the backup password is known.
+Reconstructs a structure like a Full File System acquisition from a mobile
+backup, as one zip archive:
 
-The source backup is opened read-only and is never modified. Every run writes
-traceability artefacts recording what was produced, from what, and with which
-hashes.
+- **iOS** local backups (iTunes / Finder): rebuilds the original paths from
+  `Manifest.plist` and `Manifest.db`, which the backup flattens into hashed
+  blobs. The decrypted `Manifest.db` and an enriched copy giving each file's
+  path inside the zip are placed at the archive root.
+- **Android** `adb backup` files (`.ab`): maps each app's data and shared storage
+  back to its device path (`data/data/<package>/...`, `storage/emulated/0/...`).
+
+Encrypted backups of both kinds are decrypted when the password is known. The
+source is opened read-only and never modified. Every run writes traceability
+artefacts — a readable summary with every hash, a provenance JSON, a per-file
+manifest, and the archive's own SHA-256 beside it.
 
 It is written to be **read as much as run**: the decryption path, the domain
 mapping and the traceability output are all deliberately plain Python, and
@@ -35,10 +41,11 @@ Decrypt it, keeping the backup's own layout, into a backup any tool can read:
 uv run python main.py /path/to/ios-backup /path/to/output --mode decrypt
 ```
 
-Reconstruct it, with a progress counter on a terminal:
+Reconstruct it into `output.zip`, with a progress counter on a terminal:
 
 ```bash
 uv run python main.py /path/to/ios-backup /path/to/output
+uv run python main.py /path/to/backup.ab /path/to/output     # Android
 ```
 
 Start the graphical interface:
@@ -52,7 +59,7 @@ uv run python main.py
 Full documentation lives in [docs/](docs/README.md):
 
 - [Getting started](docs/getting-started.md) — install, first reconstruction, reading the output
-- [Concepts](docs/concepts/index.md) — how iOS backups are laid out and what the tool can recover
+- [Concepts](docs/concepts/index.md) — how iOS and Android backups are laid out and what the tool can recover
 - [CLI reference](docs/cli/index.md) — every option
 - [Workflows](docs/workflows/index.md) — end-to-end task guides
 - [Formats](docs/formats/index.md) — traceability artefacts and domain-map files

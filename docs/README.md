@@ -1,13 +1,13 @@
 # Documentation
 
-Reference documentation for the iOS Backup Reconstructor.
+Reference documentation for the Mobile Backup Reconstructor (iOS and Android backups).
 
 ## Pages
 
 | Page | What it covers |
 | --- | --- |
 | [Getting started](getting-started.md) | Install, run a first reconstruction, read the output |
-| [Concepts](concepts/index.md) | iOS backup layout, domains, encryption, what is recoverable |
+| [Concepts](concepts/index.md) | iOS backup layout, domains, encryption, Android `.ab` backups, what is recoverable |
 | [CLI reference](cli/index.md) | Every command-line option, in workflow order |
 | [Workflows](workflows/index.md) | Task-oriented, end-to-end guides |
 | [Formats](formats/index.md) | Traceability artefacts and domain-map files |

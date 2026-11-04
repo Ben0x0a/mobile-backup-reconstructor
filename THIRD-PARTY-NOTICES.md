@@ -1,6 +1,6 @@
 # Third-party notices
 
-`ios-backup-reconstructor` is distributed under the GNU General Public License
+`mobile-backup-reconstructor` is distributed under the GNU General Public License
 v3.0 or later (see [LICENSE](LICENSE)). It depends on the following third-party
 packages, which carry their own licences and are **not** redistributed by this
 repository — they are installed from PyPI by `uv sync` or `pip`.

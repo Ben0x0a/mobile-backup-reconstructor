@@ -107,12 +107,14 @@ class ReconstructionTests(unittest.TestCase):
         conn.close()
         return backup
 
-    def test_info_only_encrypted_sample_does_not_need_crypto(self):
-        sample = Path("data/00008030-000A651E1AD8402E")
-        if not sample.exists():
-            self.skipTest("sample backup not present")
-        rc, _ = run_cli([str(sample), "unused", "--info-only"])
-        self.assertEqual(rc, 0)
+    def test_info_only_encrypted_backup_does_not_need_crypto(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backup, _ = self.make_backup(Path(tmp))
+            with (backup / "Manifest.plist").open("wb") as fh:
+                plistlib.dump({"IsEncrypted": True}, fh)
+            with mock.patch("core.reconstructor.require_crypto", side_effect=AssertionError("crypto used")):
+                rc, _ = run_cli([str(backup), "unused", "--info-only"])
+            self.assertEqual(rc, 0)
 
     def test_reconstruct_unencrypted_folder(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -167,10 +169,45 @@ class ReconstructionTests(unittest.TestCase):
             root = Path(tmp)
             backup, payload = self.make_backup(root)
             output = root / "out"
-            rc, _ = run_cli([str(backup), str(output), "--format", "folder"])
+            rc, _ = run_cli([str(backup), str(output)])
             self.assertEqual(rc, 0)
-            restored = output / "private" / "var" / "mobile" / "Library" / "SMS" / "sms.db"
-            self.assertEqual(restored.read_bytes(), payload)
+            # The Full File System-like layout is always a zip, on every platform.
+            with zipfile.ZipFile(root / "out.zip") as zf:
+                self.assertEqual(zf.read("private/var/mobile/Library/SMS/sms.db"), payload)
+
+    def test_filesystem_layout_refuses_an_explicit_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup, _ = self.make_backup(root)
+            rc, logged = run_cli([str(backup), str(root / "out"), "--format", "folder"])
+            self.assertEqual(rc, 1)
+            self.assertIn("always written as a zip", logged)
+            self.assertFalse((root / "out").exists())
+
+    def test_zip_root_carries_manifest_enriched_manifest_and_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup, _ = self.make_backup(root, include_directory=True)
+            output = root / "out.zip"
+            rc, _ = run_cli([str(backup), str(output)])
+            self.assertEqual(rc, 0)
+            with zipfile.ZipFile(output) as zf:
+                names = zf.namelist()
+                self.assertEqual(zf.read(settings.ROOT_MANIFEST_DB_NAME), (backup / "Manifest.db").read_bytes())
+                enriched = root / "enriched.db"
+                enriched.write_bytes(zf.read(settings.ENRICHED_MANIFEST_NAME))
+                summary = zf.read(settings.ROOT_TRACEABILITY_TEXT_NAME).decode("utf-8-sig")
+            conn = sqlite3.connect(enriched)
+            zip_paths = dict(conn.execute(f"SELECT relativePath, {settings.ENRICHED_ZIP_PATH_COLNAME} FROM Files"))
+            conn.close()
+            # Every enriched path names a real member of the archive.
+            self.assertEqual(zip_paths["Library/SMS/sms.db"], "private/var/mobile/Library/SMS/sms.db")
+            for zip_path in zip_paths.values():
+                self.assertIn(zip_path, names)
+            self.assertIn(recon.sha256_file(backup / "Manifest.plist"), summary)
+            self.assertIn(settings.TOOL_NAME, summary)
+            sidecar = root / f"out.zip{settings.ZIP_HASH_SIDECAR_SUFFIX}"
+            self.assertEqual(sidecar.read_text(), f"{recon.sha256_file(output)}  out.zip\n")
 
     def test_filesystem_domain_mapping(self):
         self.assertEqual(
@@ -336,17 +373,15 @@ class ReconstructionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             backup, _ = self.make_backup(root)
-            output = root / "out"
-            rc, _ = run_cli([str(backup), str(output), "--format", "folder", "--dry-run"])
+            output = root / "out.zip"
+            rc, _ = run_cli([str(backup), str(output), "--dry-run"])
             self.assertEqual(rc, 0)
-            self.assertTrue(
-                (output / settings.TRACEABILITY_DIR_NAME / settings.TRACEABILITY_FILE_MANIFEST_NAME).is_file()
-            )
-            self.assertFalse((output / "private" / "var" / "mobile" / "Library" / "SMS" / "sms.db").exists())
-            self.assertIn(
-                "planned",
-                (output / settings.TRACEABILITY_DIR_NAME / settings.TRACEABILITY_FILE_MANIFEST_NAME).read_text(),
-            )
+            with zipfile.ZipFile(output) as zf:
+                self.assertNotIn("private/var/mobile/Library/SMS/sms.db", zf.namelist())
+                self.assertIn(
+                    "planned",
+                    zf.read(f"{settings.TRACEABILITY_DIR_NAME}/{settings.TRACEABILITY_FILE_MANIFEST_NAME}").decode(),
+                )
 
     def test_directory_record_after_its_children_does_not_duplicate(self):
         """Regression: a directory row arriving after its files kept the real
@@ -388,7 +423,7 @@ class ReconstructionTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             manifest_path = output / settings.TRACEABILITY_DIR_NAME / settings.TRACEABILITY_FILE_MANIFEST_NAME
             manifest = manifest_path.read_text()
-            self.assertNotIn("ios_backup_output_", manifest)
+            self.assertNotIn("mobile_backup_output_", manifest)
             row = [line for line in manifest.splitlines() if "sms.db" in line][0]
             recorded = Path(row.split(",")[5])
             self.assertEqual(recorded, output / "HomeDomain" / "Library" / "SMS" / "sms.db")
@@ -442,13 +477,14 @@ class ReconstructionTests(unittest.TestCase):
             root = Path(tmp)
             backup, _ = self.make_backup(root)
             (backup / "Status.plist").unlink()
-            output = root / "out"
-            rc, _ = run_cli([str(backup), str(output), "--format", "folder"])
+            output = root / "out.zip"
+            rc, _ = run_cli([str(backup), str(output)])
             self.assertEqual(rc, 0)
 
-            provenance = json.loads(
-                (output / settings.TRACEABILITY_DIR_NAME / settings.TRACEABILITY_PROVENANCE_NAME).read_text()
-            )["backup"]
+            with zipfile.ZipFile(output) as zf:
+                provenance = json.loads(
+                    zf.read(f"{settings.TRACEABILITY_DIR_NAME}/{settings.TRACEABILITY_PROVENANCE_NAME}")
+                )["backup"]
             self.assertEqual(provenance["absent_files"], ["Status.plist"])
             self.assertIsNone(provenance["status_plist_sha256"])
             # The file that IS present still gets a real digest.
@@ -462,14 +498,12 @@ class ReconstructionTests(unittest.TestCase):
             (backup / "Info.plist").unlink()
             with (backup / "Manifest.plist").open("wb") as fh:
                 plistlib.dump({"IsEncrypted": False, "Lockdown": {"ProductVersion": "17.0"}}, fh)
-            output = root / "out"
-            rc, _ = run_cli([str(backup), str(output), "--format", "folder"])
+            output = root / "out.zip"
+            rc, _ = run_cli([str(backup), str(output)])
             self.assertEqual(rc, 0)
             # The filesystem layout requires a domain map, so this proves one was chosen.
-            self.assertEqual(
-                (output / "private" / "var" / "mobile" / "Library" / "SMS" / "sms.db").read_bytes(),
-                payload,
-            )
+            with zipfile.ZipFile(output) as zf:
+                self.assertEqual(zf.read("private/var/mobile/Library/SMS/sms.db"), payload)
 
     def test_manifest_files_are_still_required(self):
         for name in ("Manifest.plist", "Manifest.db"):
@@ -661,7 +695,7 @@ class ReconstructionTests(unittest.TestCase):
             (backup / "Manifest.db").write_bytes(b"encrypted")
             with mock.patch("core.reconstructor.require_crypto"), mock.patch("sys.stdin") as stdin:
                 stdin.isatty.return_value = False
-                rc, logged = run_cli([str(backup), str(root / "out"), "--format", "folder"])
+                rc, logged = run_cli([str(backup), str(root / "out")])
             self.assertEqual(rc, 1)
             self.assertIn("no password was supplied", logged)
 

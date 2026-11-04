@@ -1,0 +1,49 @@
+# Android `adb backup` (.ab) archive paths -> Full File System-like paths.
+#
+# Source of the tokens: AOSP frameworks/base core/java/android/app/backup/
+# FullBackup.java (constants *_TREE_TOKEN, SHARED_PREFIX) and
+# FullBackup.BackupScheme.tokenToDirectoryPath, which resolves each token to an
+# app directory on the device. Paths are for user 0, the user `adb backup` runs
+# as by default.
+#
+# Archive layout: apps/<package>/<token>/<path> and shared/<volume>/<path>.
+#
+# Placeholders: {package}, {token}, {volume}, {path}.
+#
+# `data/data/<package>` is the credential-encrypted data dir of user 0
+# (`Context.getDataDir()`); on current Android it is the same directory as
+# `data/user/0/<package>`. FFS acquisitions commonly present it as data/data.
+name: aosp_full_backup
+
+app_tokens:
+  r: data/data/{package}                            # ROOT_TREE_TOKEN    getDataDir()
+  f: data/data/{package}/files                      # FILES_TREE_TOKEN   getFilesDir()
+  db: data/data/{package}/databases                 # DATABASE_TREE_TOKEN
+  sp: data/data/{package}/shared_prefs              # SHAREDPREFS_TREE_TOKEN
+  c: data/data/{package}/cache                      # CACHE_TREE_TOKEN   getCacheDir()
+  nb: data/data/{package}/no_backup                 # NO_BACKUP_TREE_TOKEN getNoBackupFilesDir()
+  d_r: data/user_de/0/{package}                     # DEVICE_ROOT_TREE_TOKEN (device-protected storage)
+  d_f: data/user_de/0/{package}/files               # DEVICE_FILES_TREE_TOKEN
+  d_db: data/user_de/0/{package}/databases          # DEVICE_DATABASE_TREE_TOKEN
+  d_sp: data/user_de/0/{package}/shared_prefs       # DEVICE_SHAREDPREFS_TREE_TOKEN
+  d_c: data/user_de/0/{package}/cache               # DEVICE_CACHE_TREE_TOKEN
+  d_nb: data/user_de/0/{package}/no_backup          # DEVICE_NO_BACKUP_TREE_TOKEN
+  ef: storage/emulated/0/Android/data/{package}/files  # MANAGED_EXTERNAL_TREE_TOKEN getExternalFilesDir(null)
+  obb: storage/emulated/0/Android/obb/{package}     # OBB_TREE_TOKEN
+  # APK_TREE_TOKEN. On the device the APK lives under a randomised directory
+  # (data/app/~~<random>/<package>-<random>/), which the backup does not record.
+  a: data/app/{package}
+  # KEY_VALUE_DATA_TOKEN: key/value backup records, not files on the device.
+  k: backup_only/apps/{package}/k
+
+# shared/<volume>: volume 0 is the primary shared storage.
+shared_volumes:
+  0: storage/emulated/0
+
+# Archive entries with no on-device location (per-app _manifest and _meta,
+# unknown tokens, anything outside apps/ and shared/) are kept under
+# backup_only/, so nothing in the archive is dropped.
+app_metadata_template: backup_only/apps/{package}
+unknown_app_token_template: backup_only/apps/{package}/{token}
+unknown_shared_template: backup_only/shared/{volume}
+unknown_template: backup_only/{path}

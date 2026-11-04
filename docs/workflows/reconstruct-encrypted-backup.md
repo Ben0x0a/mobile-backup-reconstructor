@@ -17,7 +17,7 @@ uv run python main.py /path/to/backup /path/to/out --dry-run
 
 You will be asked for the password, because the planned paths come from
 `Manifest.db`, which is itself encrypted. Review
-`_traceability/ios-backup-reconstruct.file-manifest.traceability.csv` to check
+`_traceability/mobile-backup-reconstruct.file-manifest.traceability.csv` to check
 the mapping before committing disk space.
 
 ## 3. Reconstruct

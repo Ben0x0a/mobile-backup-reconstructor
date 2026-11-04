@@ -312,7 +312,7 @@ def decrypt_backup(
         raise BackupError("Backup keybag was not unlocked")
 
     command = command or [TOOL_NAME]
-    staging = tempfile.TemporaryDirectory(prefix="ios_backup_decrypt_", dir=output.parent.resolve())
+    staging = tempfile.TemporaryDirectory(prefix="mobile_backup_decrypt_", dir=output.parent.resolve())
     try:
         staged = long_path(Path(staging.name) / output.name)
         staged.mkdir(parents=True, exist_ok=True)
