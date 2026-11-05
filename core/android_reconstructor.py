@@ -232,7 +232,7 @@ def reconstruct_ab_to_zip(
                 packages.add(package)
             arcname = writer.claim(device_path, member.isdir())
             if member.isdir():
-                dir_name = arcname if dry_run else writer.add_directory(arcname)
+                dir_name = arcname if dry_run else writer.add_directory(arcname, _member_mtime(member))
                 rows.append(_row(member, dir_name, package, token, "directory_record"))
                 stats["directories"] += 1
                 continue

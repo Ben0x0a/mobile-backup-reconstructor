@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-11-05
+
+### Fixed
+
+- **Directory entries in the zip keep their device timestamp.** They were
+  stamped with the time of the run, which replaced the directory's modification
+  time recorded in the backup (the tar header for Android, the `Files.file`
+  metadata for iOS). Found on a real Android backup, whose 25 file contents were
+  also checked byte for byte against an independent decode of the `.ab`.
+
 ## [0.3.0] — 2026-11-04
 
 ### Internal

@@ -90,11 +90,17 @@ class FfsZipWriter:
         """Reserve a member name for one device path; see claim_unique_path."""
         return claim_unique_path(rel, self.claimed, is_directory).as_posix()
 
-    def add_directory(self, arcname: str) -> str:
+    def add_directory(self, arcname: str, mtime: datetime | None) -> str:
+        """Write a directory entry carrying the device timestamp.
+
+        WHY the source mtime, not the run time: a directory's modification time
+        is evidence (when its content last changed on the device), and stamping
+        the run time replaced it. Through zip_info so it is stored in UTC like
+        every other member; a bare name would take the host's local time. With
+        no source timestamp the zip epoch is stored, as for files.
+        """
         dir_name = arcname if arcname.endswith("/") else f"{arcname}/"
-        # Through zip_info so the entry is stamped in UTC like every other
-        # member; a bare name would take the host's local time.
-        self._zf.writestr(zip_info(dir_name, datetime.now(UTC)), b"")
+        self._zf.writestr(zip_info(dir_name, mtime), b"")
         return dir_name
 
     def add_member(self, arcname: str, mtime: datetime | None, produce: Callable[[BinaryIO], T]) -> T:

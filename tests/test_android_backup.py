@@ -23,6 +23,7 @@ import tempfile
 import unittest
 import zipfile
 import zlib
+from datetime import UTC, datetime
 from pathlib import Path
 
 from cryptography.hazmat.primitives import padding
@@ -159,6 +160,11 @@ class AndroidBackupTests(unittest.TestCase):
             )
             self.assertEqual(zf.read("storage/emulated/0/DCIM/Camera/IMG_0001.jpg"), b"\xff\xd8photo")
             self.assertIn("data/data/com.example.chat/files/media/", zf.namelist())
+            # Regression: directories kept the run time instead of their tar mtime.
+            self.assertEqual(
+                zf.getinfo("data/data/com.example.chat/files/media/").date_time,
+                datetime.fromtimestamp(1_700_000_000, UTC).timetuple()[:6],
+            )
             provenance = json.loads(
                 zf.read(f"{settings.TRACEABILITY_DIR_NAME}/{settings.TRACEABILITY_PROVENANCE_NAME}")
             )

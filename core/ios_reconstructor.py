@@ -279,7 +279,7 @@ def reconstruct_to_zip(
         stats["records"] += 1
         arcname = writer.claim(record.output_path, is_directory_record(record))
         if is_directory_record(record):
-            dir_name = writer.add_directory(arcname)
+            dir_name = writer.add_directory(arcname, metadata_mtime(record.metadata))
             rows.append(row_for_record(record, dir_name, "directory_record"))
             stats["directories"] += 1
             continue
