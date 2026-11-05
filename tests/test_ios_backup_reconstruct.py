@@ -17,6 +17,7 @@ import sqlite3
 import tempfile
 import unittest
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
@@ -665,6 +666,58 @@ class ReconstructionTests(unittest.TestCase):
                 self.assertEqual(zf.read(member), b"x" * 16)
                 self.assertIn(settings.ROOT_MANIFEST_DB_NAME, zf.namelist())
             self.assertTrue((root / f"out.zip{settings.ZIP_HASH_SIDECAR_SUFFIX}").is_file())
+
+    def test_integer_last_modified_is_kept_in_the_zip(self):
+        """Regression: an integer `LastModified` (Unix seconds, how current backups
+        store it) was ignored, so every member was stamped 1980-01-01."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup, payload = self.make_backup(root)
+            # The NSKeyedArchiver shape a real Files.file blob has.
+            mbfile = {
+                "$version": 100000,
+                "$archiver": "NSKeyedArchiver",
+                "$top": {"root": plistlib.UID(1)},
+                "$objects": [
+                    "$null",
+                    {"$class": plistlib.UID(2), "LastModified": 1_700_000_001, "Size": len(payload)},
+                    {"$classname": "MBFile", "$classes": ["MBFile", "NSObject"]},
+                ],
+            }
+            conn = sqlite3.connect(backup / "Manifest.db")
+            conn.execute("UPDATE Files SET file = ?", (plistlib.dumps(mbfile, fmt=plistlib.FMT_BINARY),))
+            conn.commit()
+            conn.close()
+            rc, _ = run_cli([str(backup), str(root / "out")])
+            self.assertEqual(rc, 0)
+            with zipfile.ZipFile(root / "out.zip") as zf:
+                # 2023-11-14 22:13:21 UTC; the zip format keeps even seconds only.
+                self.assertEqual(
+                    zf.getinfo("private/var/mobile/Library/SMS/sms.db").date_time, (2023, 11, 14, 22, 13, 20)
+                )
+
+    def test_zip_members_are_stored_uncompressed(self):
+        """Stored members are what lets search tools read the archive in place."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup, _ = self.make_backup(root, include_directory=True)
+            self.assertEqual(run_cli([str(backup), str(root / "out")])[0], 0)
+            with zipfile.ZipFile(root / "out.zip") as zf:
+                self.assertEqual({info.compress_type for info in zf.infolist()}, {zipfile.ZIP_STORED})
+
+    def test_metadata_mtime_forms(self):
+        when = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
+        cases = {
+            "unix seconds": ({"LastModified": int(when.timestamp())}, when),
+            "float seconds": ({"LastModified": when.timestamp()}, when),
+            "plist date": ({"LastModified": when}, when),
+            "flag, not a time": ({"LastModified": True}, None),
+            "out of range": ({"LastModified": 10**20}, None),
+            "absent": ({}, None),
+        }
+        for label, (metadata, expected) in cases.items():
+            with self.subTest(label):
+                self.assertEqual(ios_backup.metadata_mtime(metadata), expected)
 
     def test_auto_format_is_zip_on_windows_for_every_layout(self):
         for layout in ("filesystem", "backup"):

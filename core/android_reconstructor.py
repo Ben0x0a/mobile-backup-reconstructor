@@ -35,6 +35,7 @@ from config.settings import (
     ANDROID_MAP_DIR_NAME,
     ANDROID_MAP_FILE_NAME,
     CHUNK_SIZE,
+    DEFAULT_BACKUP_PASSWORDS,
     FFS_LAYOUT,
     ROOT_TRACEABILITY_TEXT_NAME,
     TOOL_NAME,
@@ -42,7 +43,14 @@ from config.settings import (
     TRACEABILITY_DIR_NAME,
     TRACEABILITY_FILE_MANIFEST_NAME,
 )
-from core.android_backup import PAYLOAD_ERRORS, AbHeader, open_ab_tar, read_ab_header_from
+from core.android_backup import (
+    PAYLOAD_ERRORS,
+    AbHeader,
+    AndroidBackupError,
+    open_ab_tar,
+    read_ab_header_from,
+    unlock_encryption_key,
+)
 from core.errors import BackupError, ReconstructionFailedError
 from core.ffs_archive import (
     FfsZipWriter,
@@ -280,6 +288,7 @@ def build_android_provenance(
     command: list[str],
     dry_run: bool,
     continue_on_error: bool,
+    try_default_passwords: bool = False,
 ) -> dict[str, Any]:
     return {
         "tool": TOOL_NAME,
@@ -313,6 +322,7 @@ def build_android_provenance(
             "path_map_name": amap["name"],
             "dry_run": dry_run,
             "continue_on_error": continue_on_error,
+            "try_default_passwords": try_default_passwords,
             "cancelled": bool(stats.get("cancelled")),
         },
         "stats": stats,
@@ -359,6 +369,7 @@ def android_traceability_sections(
                 ("Path map", output["path_map_name"]),
                 ("Dry run", output["dry_run"]),
                 ("Continue on error", output["continue_on_error"]),
+                ("Default passwords tried", output["try_default_passwords"]),
                 ("Cancelled (incomplete)", output["cancelled"]),
             ],
         ),
@@ -374,7 +385,7 @@ def android_traceability_sections(
     ]
 
 
-def reject_android_options(output_format: str, output_layout: str, try_default_passwords: bool) -> None:
+def reject_android_options(output_format: str, output_layout: str) -> None:
     """Refuse options with no meaning for an `.ab`, saying why.
 
     WHY an error rather than ignoring them: the operator believes they asked
@@ -387,16 +398,30 @@ def reject_android_options(output_format: str, output_layout: str, try_default_p
         )
     if output_format == "folder":
         raise BackupError("An Android backup is always reconstructed into a zip (see the Windows path limit).")
-    if try_default_passwords:
-        raise BackupError(
-            "--try-default-passwords lists iOS acquisition-tool defaults; it does not apply to .ab files."
-        )
 
 
-def resolve_android_password(header: AbHeader, password: str | None, allow_prompt: bool) -> str | None:
-    """The password to unlock with: given, prompted on a real terminal, or refused."""
+def resolve_android_password(
+    header: AbHeader, password: str | None, allow_prompt: bool, try_default_passwords: bool = False
+) -> str | None:
+    """The password to unlock with: given, a matching default, prompted, or refused.
+
+    `try_default_passwords` opts in to trying DEFAULT_BACKUP_PASSWORDS before
+    prompting, exactly as for iOS (reconstructor.prepare_manifest_db): guessing
+    is the examiner's choice, never a default, and it is recorded in provenance.
+    WHY test them here, against the header: the key-blob checksum tells a right
+    password from a wrong one before any payload is read, so a wrong guess costs
+    two PBKDF2 runs and nothing is written.
+    """
     if not header.encrypted or password:
         return password
+    if try_default_passwords:
+        for candidate in DEFAULT_BACKUP_PASSWORDS:
+            try:
+                unlock_encryption_key(header, candidate)
+            except AndroidBackupError:
+                continue
+            _LOG.warning(f"Android backup unlocked with the default password {candidate!r}")
+            return candidate
     # Same TTY rule as the iOS path (reconstructor.prepare_manifest_db): getpass
     # raises on a pipe, which must not escape as a traceback.
     if allow_prompt and sys.stdin is not None and sys.stdin.isatty():
@@ -404,6 +429,10 @@ def resolve_android_password(header: AbHeader, password: str | None, allow_promp
             return getpass.getpass("Android backup password: ")
         except (EOFError, KeyboardInterrupt) as exc:
             raise BackupError("No backup password was entered.") from exc
+    if try_default_passwords:
+        raise BackupError(
+            "This Android backup is encrypted, none of the default passwords unlocks it, and no password was supplied."
+        )
     raise BackupError("This Android backup is encrypted and no password was supplied.")
 
 
@@ -424,7 +453,7 @@ def reconstruct_android_backup(
     cancel: CancelEvent | None = None,
 ) -> ReconstructionResult:
     """Same contract as reconstructor.reconstruct_backup, for an `.ab` input."""
-    reject_android_options(output_format, output_layout, try_default_passwords)
+    reject_android_options(output_format, output_layout)
     backup = backup.resolve()
     header = read_ab_header_from(backup)
     amap = load_android_map(path_map)
@@ -437,7 +466,7 @@ def reconstruct_android_backup(
         raise BackupError(f"Output zip already exists: {output}. Use --force to overwrite.")
     if not output.parent.expanduser().resolve().exists():
         raise BackupError(f"Output parent directory does not exist: {output.parent}")
-    password = resolve_android_password(header, password, allow_password_prompt)
+    password = resolve_android_password(header, password, allow_password_prompt, try_default_passwords)
     command = command or [TOOL_NAME]
 
     stage_root = make_staging_dir(output.parent.expanduser().resolve())
@@ -457,7 +486,18 @@ def reconstruct_android_backup(
                 rows, stats, packages, stream_error = [], new_android_stats(), [], describe_payload_error(exc)
                 stats["failed"] = 1
             provenance = build_android_provenance(
-                backup, header, regime, output, amap, stats, packages, stream_error, command, dry_run, continue_on_error
+                backup,
+                header,
+                regime,
+                output,
+                amap,
+                stats,
+                packages,
+                stream_error,
+                command,
+                dry_run,
+                continue_on_error,
+                try_default_passwords,
             )
             if stats["failed"] and not continue_on_error and not stats["cancelled"]:
                 report_path = write_failure_report(output, provenance, rows, ANDROID_MANIFEST_FIELDNAMES)

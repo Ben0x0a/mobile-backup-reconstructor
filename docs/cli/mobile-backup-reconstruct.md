@@ -24,7 +24,7 @@ Listed in the order an operator uses them.
 | `--domain-map PATH` | shipped maps | iOS: a YAML file, or a directory of them, overriding the domain-to-path mapping. Android: a path-map YAML file |
 | `--format {auto,folder,zip}` | `auto` | The filesystem layout is always a zip (`folder` is refused). For the backup layout, `auto` selects zip on Windows, folder elsewhere |
 | `--force` | off | Append to an existing output folder, or overwrite an existing zip |
-| `--try-default-passwords` | off | iOS: before prompting, try the backup passwords commonly set by acquisition tools |
+| `--try-default-passwords` | off | Before prompting, try the backup passwords commonly set by acquisition tools (iOS and Android) |
 | `--continue-on-error` | off | Keep successfully reconstructed files when some rows fail |
 | `--quiet` | off | Suppress the progress counter |
 | `--verbose` | off | Log debug-level diagnostics to stderr |

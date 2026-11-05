@@ -37,6 +37,9 @@ output.zip.sha256                          # SHA-256 of the archive itself
 | `mobile-backup-reconstruct.traceability.txt` | UTF-8 (with BOM) summary: run, source and device, SHA-256 of every source manifest file and of every root artefact, output options, statistics, and (Android) the package list. Written last, because it lists the others' digests |
 | `<output>.zip.sha256` | One line in `sha256sum` format, outside the archive because an archive cannot contain its own digest. Verify with `sha256sum -c output.zip.sha256` or `shasum -a 256 -c output.zip.sha256` |
 
+Members are **stored uncompressed** (`ZIP_COMPRESSION` in `config/settings.py`),
+so search tools can read them in place; the archive is correspondingly larger.
+
 Member timestamps are the device's, in UTC. The zip format stores them to
 2-second resolution, so an odd second is rounded down; the exact value is in
 `Manifest.db` (iOS) or the file manifest's `mtime_utc` column (Android).

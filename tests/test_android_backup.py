@@ -194,6 +194,29 @@ class AndroidBackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.assert_reconstructed(self.reconstruct(self.write_ab(Path(tmp), password="sécret"), "sécret"))
 
+    def test_default_passwords_are_tried_only_when_asked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ab_path = self.write_ab(Path(tmp), password="1234")
+            with self.assertRaises(errors.BackupError):
+                self.reconstruct(ab_path)  # no password, no opt-in: refused
+            output = ab_path.parent / "out.zip"
+            arecon.reconstruct_android_backup(ab_path, output, allow_password_prompt=False, try_default_passwords=True)
+            self.assert_reconstructed(output)
+            with zipfile.ZipFile(output) as zf:
+                provenance = json.loads(
+                    zf.read(f"{settings.TRACEABILITY_DIR_NAME}/{settings.TRACEABILITY_PROVENANCE_NAME}")
+                )
+            self.assertTrue(provenance["output"]["try_default_passwords"])
+
+    def test_no_default_password_matches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ab_path = self.write_ab(Path(tmp), password="not-a-default")
+            with self.assertRaises(errors.BackupError) as caught:
+                arecon.reconstruct_android_backup(
+                    ab_path, ab_path.parent / "out.zip", allow_password_prompt=False, try_default_passwords=True
+                )
+            self.assertIn("none of the default passwords", str(caught.exception))
+
     def test_wrong_password_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
             ab_path = self.write_ab(Path(tmp), password="right")

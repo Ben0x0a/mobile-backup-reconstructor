@@ -69,8 +69,11 @@ like AOSP, the tool tries it as a fallback for version 1 only. Which one worked
 is recorded as `key_derivation` in the provenance.
 
 The tool prompts for the password on a terminal; the GUI takes it in the
-password field. `--try-default-passwords` lists iOS acquisition-tool defaults and
-is refused for `.ab` files.
+password field. `--try-default-passwords` first tries the same short list of
+acquisition-tool defaults as for iOS (`1234`, `12345`, `123456`, `password`).
+Each guess is checked against the key-blob checksum before any payload is read,
+so a wrong one writes nothing. Like for iOS, it is opt-in, logged when a default
+unlocks the backup, and recorded as `output.try_default_passwords`.
 
 ## Integrity
 

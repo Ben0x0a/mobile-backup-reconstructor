@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] — 2026-11-05
+
+### Fixed
+
+- **iOS files keep their modification time in the zip.** Every member was
+  stamped 1980-01-01: current backups store `LastModified` in the `MBFile`
+  metadata as an integer Unix timestamp, and only the older plist-date form was
+  accepted. Both forms are now read (as MVT does).
+
+### Changed
+
+- **Zip members are stored uncompressed**, so search tools read them in place
+  (mf-scan memory-maps stored members). Archives are larger; set
+  `ZIP_COMPRESSION = zipfile.ZIP_DEFLATED` in `config/settings.py` to compress.
+- **`--try-default-passwords` now applies to Android `.ab` files** as well, with
+  the same list and the same opt-in, logging and provenance as for iOS.
+
 ## [0.3.1] — 2026-11-05
 
 ### Fixed

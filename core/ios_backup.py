@@ -16,7 +16,7 @@ import os
 import plistlib
 import sqlite3
 from collections.abc import Iterable, Iterator
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -144,9 +144,25 @@ def metadata_size(metadata: dict[str, Any]) -> int | None:
 
 
 def metadata_mtime(metadata: dict[str, Any]) -> datetime | None:
+    """The record's modification time, as an aware UTC datetime when it is an integer.
+
+    HOW: a `datetime` is returned as is; an int or float is read as Unix epoch
+    seconds in UTC. Anything else, or a value no datetime can hold, gives None.
+    WHY both: the `MBFile` metadata of current backups stores `LastModified` as an
+    integer Unix timestamp, older ones as a plist date (MVT's
+    `Manifest._convert_timestamp` handles the same two forms). Accepting only the
+    date form stamped every file of a current backup with the zip epoch (1980),
+    discarding the device timestamp.
+    """
     value = first_present(metadata, ("LastModified", "LastModifiedDate", "Modified", "mtime"))
     if isinstance(value, datetime):
         return value
+    # bool is an int subclass, but a flag is never a timestamp.
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        try:
+            return datetime.fromtimestamp(value, UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
     return None
 
 

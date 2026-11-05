@@ -11,10 +11,12 @@ Depends on: nothing.
 
 from __future__ import annotations
 
+import zipfile
+
 # Tool identity. Written into every traceability artefact so reconstructed
 # evidence is attributable to the tool and version that produced it.
 TOOL_NAME = "mobile-backup-reconstruct"
-TOOL_VERSION = "0.3.1"
+TOOL_VERSION = "0.3.2"
 
 # Traceability artefact names. Both carry the tool tag so an artefact found
 # outside its output folder is still attributable.
@@ -52,7 +54,9 @@ DEFAULT_OUTPUT_LAYOUT = "filesystem"
 # are the defaults commonly set by acquisition tools, not a cracking wordlist.
 # Opt-in by design: guessing is an examiner's decision to make and account for,
 # and the choice is recorded in the provenance artefact.
-# Consumed by: core.reconstructor (prepare_manifest_db).
+# Used for iOS and Android backups alike.
+# Consumed by: core.ios_crypto (prepare_manifest_db),
+# core.android_reconstructor (resolve_android_password).
 DEFAULT_BACKUP_PASSWORDS = ("1234", "12345", "123456", "password")
 
 # The files a backup must have. Only these two are load-bearing: Manifest.plist
@@ -74,6 +78,14 @@ CHUNK_SIZE = 1024 * 1024
 # Consumed by: core.android_reconstructor (default_android_map_path).
 ANDROID_MAP_DIR_NAME = "android_maps"
 ANDROID_MAP_FILE_NAME = "aosp_full_backup.yaml"
+
+# How zip members are stored. ZIP_STORED (no compression) by default.
+# WHY: search tools read stored members in place (mf-scan memory-maps them, which
+# its documentation measures at roughly 40-100x faster than on deflated archives),
+# and evidence content is often already compressed (images, video). The cost is a
+# larger archive. Set zipfile.ZIP_DEFLATED to trade search speed for size.
+# Consumed by: core.ffs_archive (FfsZipWriter, zip_info).
+ZIP_COMPRESSION = zipfile.ZIP_STORED
 
 # Threshold above which zip members spool to disk instead of memory, in bytes.
 # Consumed by: core.reconstructor (reconstruct_to_zip).

@@ -32,6 +32,7 @@ from config.settings import (
     TOOL_NAME,
     TOOL_VERSION,
     TRACEABILITY_DIR_NAME,
+    ZIP_COMPRESSION,
     ZIP_HASH_SIDECAR_SUFFIX,
     ZIP_SPOOL_MAX_SIZE,
 )
@@ -47,7 +48,7 @@ TraceSection = tuple[str, list[tuple[str, Any]]]
 
 
 def zip_info(arcname: str, mtime: datetime | None) -> zipfile.ZipInfo:
-    """A deflated member header carrying the device timestamp, in UTC.
+    """A member header carrying the device timestamp (UTC) and ZIP_COMPRESSION.
 
     WHY clamp to 1980: the zip format cannot store an earlier date, and a
     zero or bogus device timestamp would otherwise raise and fail the file.
@@ -57,7 +58,7 @@ def zip_info(arcname: str, mtime: datetime | None) -> zipfile.ZipInfo:
         if mtime.tzinfo is not None:
             mtime = mtime.astimezone(UTC).replace(tzinfo=None)
         info.date_time = max(mtime.timetuple()[:6], ZIP_EPOCH)
-    info.compress_type = zipfile.ZIP_DEFLATED
+    info.compress_type = ZIP_COMPRESSION
     return info
 
 
@@ -75,7 +76,7 @@ class FfsZipWriter:
         for name in (*reserved_root_names, TRACEABILITY_DIR_NAME):
             claim_unique_path(PurePosixPath(name), self.claimed, is_directory=False)
         long_path(zip_path).parent.mkdir(parents=True, exist_ok=True)
-        self._zf = zipfile.ZipFile(long_path(zip_path), "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True)
+        self._zf = zipfile.ZipFile(long_path(zip_path), "w", compression=ZIP_COMPRESSION, allowZip64=True)
 
     def __enter__(self) -> FfsZipWriter:
         return self
