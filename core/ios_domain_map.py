@@ -22,7 +22,7 @@ from core.output_paths import (
     safe_join_path,
     safe_output_path,
 )
-from core.package_resources import _RESOURCE_STACK
+from core.package_resources import RESOURCE_STACK
 
 DomainMap = dict[str, Any]
 
@@ -37,7 +37,7 @@ def default_domain_map_path() -> Path:
     into a zip, frozen by PyInstaller, or used as a namespace package.
     """
     resource = files("config").joinpath("domain_maps")
-    return Path(_RESOURCE_STACK.enter_context(as_file(resource)))
+    return Path(RESOURCE_STACK.enter_context(as_file(resource)))
 
 
 def parse_simple_domain_yaml(path: Path) -> DomainMap:

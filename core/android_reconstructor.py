@@ -54,7 +54,7 @@ from core.ffs_archive import (
 from core.ios_domain_map import parse_simple_domain_yaml
 from core.models import ReconstructionResult
 from core.output_paths import safe_join_path
-from core.package_resources import _RESOURCE_STACK
+from core.package_resources import RESOURCE_STACK
 from core.run_control import (
     CancelEvent,
     ProgressCallback,
@@ -94,7 +94,7 @@ ANDROID_RESERVED_ROOT_NAMES = (ROOT_TRACEABILITY_TEXT_NAME,)
 def default_android_map_path() -> Path:
     """Locate the shipped map; see reconstructor.default_domain_map_path for why importlib."""
     resource = files("config").joinpath(ANDROID_MAP_DIR_NAME, ANDROID_MAP_FILE_NAME)
-    return Path(_RESOURCE_STACK.enter_context(as_file(resource)))
+    return Path(RESOURCE_STACK.enter_context(as_file(resource)))
 
 
 def load_android_map(path: Path | None = None) -> AndroidMap:
