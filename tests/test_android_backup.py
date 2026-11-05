@@ -32,7 +32,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from config import settings
 from core import android_backup as ab
 from core import android_reconstructor as arecon
-from core import errors, traceability
+from core import errors, output_paths, traceability
 from core import reconstructor as recon
 from launcher import cli
 
@@ -41,7 +41,11 @@ ROUNDS = 1000  # AOSP uses 10000; fewer keeps the suite fast and is equally vali
 
 def build_tar(members: dict[str, bytes], directories: tuple[str, ...] = ()) -> bytes:
     buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+    # PAX when a name needs it, as AOSP does (libs/androidfw/BackupHelpers.cpp
+    # write_tarfile: pax extended headers for long or non-7-bit-clean paths).
+    needs_pax = any(len(name) > 100 or not name.isascii() for name in (*members, *directories))
+    tar_format = tarfile.PAX_FORMAT if needs_pax else tarfile.USTAR_FORMAT
+    with tarfile.open(fileobj=buffer, mode="w", format=tar_format) as tar:
         for name in directories:
             info = tarfile.TarInfo(name)
             info.type = tarfile.DIRTYPE
@@ -204,6 +208,19 @@ class AndroidBackupTests(unittest.TestCase):
             with self.assertRaises(errors.ReconstructionFailedError):
                 self.reconstruct(ab_path)
             self.assertFalse((Path(tmp) / "out.zip").exists())
+
+    def test_paths_over_the_windows_limit_are_a_complete_zip(self):
+        """Same guarantee as iOS: an over-length device path is only a zip member."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            deep = "/".join(["AVeryDeeplyNestedDirectoryName" * 2] * 5) + "/payload.bin"
+            ab_path = root / "long.ab"
+            ab_path.write_bytes(build_ab(build_tar({f"apps/com.example.chat/f/{deep}": b"y" * 8}), password="pw"))
+            output = self.reconstruct(ab_path, "pw")
+            member = f"data/data/com.example.chat/files/{deep}"
+            self.assertGreater(len(str(root / member)), output_paths.WINDOWS_MAX_PATH, "must exceed the limit")
+            with zipfile.ZipFile(output) as zf:
+                self.assertEqual(zf.read(member), b"y" * 8)
 
     def test_meaningless_options_are_refused(self):
         with tempfile.TemporaryDirectory() as tmp:

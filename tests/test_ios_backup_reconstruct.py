@@ -21,7 +21,7 @@ from pathlib import Path
 from unittest import mock
 
 from config import settings
-from core import errors, ios_backup, ios_crypto, ios_domain_map, models, output_paths, traceability
+from core import errors, ios_backup, ios_crypto, ios_domain_map, ios_reconstructor, models, output_paths, traceability
 from launcher import cli
 
 
@@ -644,6 +644,32 @@ class ReconstructionTests(unittest.TestCase):
                 (output / settings.TRACEABILITY_DIR_NAME / settings.TRACEABILITY_PROVENANCE_NAME).read_text()
             )
             self.assertGreaterEqual(provenance["stats"]["long_paths"], 1)
+
+    def test_ffs_layout_over_the_windows_limit_is_a_complete_zip(self):
+        """The default run turns paths too long for a Windows folder tree into a zip.
+
+        WHY: the FFS-like layout is always a zip precisely so these paths never
+        touch the file system. Runs on every platform; Windows CI is the real check.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            deep = "/".join(["AVeryDeeplyNestedDirectoryName" * 2] * 5) + "/payload.bin"
+            backup = self.make_backup_with_sizes(root, {deep: (b"x" * 16, 16)})
+            output = root / "out"
+            rc, _ = run_cli([str(backup), str(output)])
+            self.assertEqual(rc, 0)
+            self.assertFalse(output.exists(), "no folder tree may be written")
+            member = f"private/var/mobile/{deep}"
+            self.assertGreater(len(str(root / member)), output_paths.WINDOWS_MAX_PATH, "must exceed the limit")
+            with zipfile.ZipFile(root / "out.zip") as zf:
+                self.assertEqual(zf.read(member), b"x" * 16)
+                self.assertIn(settings.ROOT_MANIFEST_DB_NAME, zf.namelist())
+            self.assertTrue((root / f"out.zip{settings.ZIP_HASH_SIDECAR_SUFFIX}").is_file())
+
+    def test_auto_format_is_zip_on_windows_for_every_layout(self):
+        for layout in ("filesystem", "backup"):
+            with self.subTest(layout=layout), mock.patch("platform.system", return_value="Windows"):
+                self.assertEqual(ios_reconstructor.normalise_output_format("auto", layout), "zip")
 
     def test_long_path_is_a_no_op_off_windows(self):
         p = Path("/tmp/some/path")
